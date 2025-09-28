@@ -1,0 +1,29 @@
+[project]
+name = "hn-search"
+version = "0.1.0"
+description = "Hacker News search using vector embeddings"
+requires-python = ">=3.13"
+dependencies = [
+    "chromadb",
+    "sentence-transformers",
+    "html2text",
+    "torch",
+    "langgraph",
+    "langchain",
+    "langchain-openai",
+    "python-dotenv",
+    "gradio",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
