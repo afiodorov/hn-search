@@ -10,3 +10,31 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
     shm_size: 2g
+
+  app:
+    build: .
+    ports:
+      - "7860:7860"
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/hn_search
+    volumes:
+      - .:/app
+      - /app/.venv
+    command: python -m hn_search.rag.web_ui
+
+  dev:
+    build: .
+    ports:
+      - "7861:7860"
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/hn_search
+    volumes:
+      - .:/app
+      - /app/.venv
+    command: bash
+    stdin_open: true
+    tty: true
