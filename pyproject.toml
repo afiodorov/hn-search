@@ -17,6 +17,8 @@ dependencies = [
     "pandas",
     "psycopg[binary]>=3.0",
     "pgvector",
+    "redis>=6.4.0",
+    "langchain-community>=0.3.30",
 ]
 
 [[tool.uv.index]]

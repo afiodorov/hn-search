@@ -1,40 +1,13 @@
 services:
-  postgres:
-    image: pgvector/pgvector:pg17
+  redis:
+    image: redis:7-alpine
+    container_name: hn-search-redis
     ports:
-      - "5432:5432"
+      - "6380:6379"
     volumes:
-      - ./postgres_data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_DB=hn_search
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-    shm_size: 2g
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
 
-  app:
-    build: .
-    ports:
-      - "7860:7860"
-    depends_on:
-      - postgres
-    environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/hn_search
-    volumes:
-      - .:/app
-      - /app/.venv
-    command: python -m hn_search.rag.web_ui
-
-  dev:
-    build: .
-    ports:
-      - "7861:7860"
-    depends_on:
-      - postgres
-    environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/hn_search
-    volumes:
-      - .:/app
-      - /app/.venv
-    command: bash
-    stdin_open: true
-    tty: true
+volumes:
+  redis_data:

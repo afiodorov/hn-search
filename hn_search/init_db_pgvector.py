@@ -4,26 +4,33 @@ from pathlib import Path
 
 import pandas as pd
 import psycopg
+from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
+
+from hn_search.db_config import get_db_config
+
+load_dotenv()
+
+
+def get_connection():
+    """Get a fresh database connection with vector registration"""
+    db_config = get_db_config()
+    conn = psycopg.connect(**db_config)
+    register_vector(conn)
+    return conn
 
 
 def init_db_from_precomputed(
     embeddings_dir: str = "embeddings",
-    db_host: str = "localhost",
-    db_port: int = 5432,
-    db_name: str = "hn_search",
-    db_user: str = "postgres",
-    db_password: str = "postgres",
     test_mode: bool = False,
 ):
-    conn = psycopg.connect(
-        host=db_host,
-        port=db_port,
-        dbname=db_name,
-        user=db_user,
-        password=db_password,
+    db_config = get_db_config()
+    print(
+        f"Connecting to database at {db_config['host']}:{db_config['port']}/{db_config['dbname']}"
     )
-    register_vector(conn)
+
+    # Initial connection for schema setup
+    conn = get_connection()
 
     with conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -48,6 +55,8 @@ def init_db_from_precomputed(
         """)
         conn.commit()
 
+    conn.close()
+
     embeddings_path = Path(embeddings_dir)
     if not embeddings_path.is_absolute():
         embeddings_path = Path.cwd() / embeddings_path
@@ -67,71 +76,108 @@ def init_db_from_precomputed(
     for file_idx, parquet_file in enumerate(parquet_files, 1):
         file_name = Path(parquet_file).name
 
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM processed_files WHERE filename = %s", (file_name,)
-            )
-            if cur.fetchone():
-                print(
-                    f"\n[{file_idx}/{len(parquet_files)}] Skipping {file_name} (already done)"
-                )
-                continue
+        # Fresh connection for each file
+        print(f"\n[{file_idx}/{len(parquet_files)}] Processing {file_name}")
 
-        print(f"\n[{file_idx}/{len(parquet_files)}] Loading {file_name}")
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                conn = get_connection()
 
-        df = pd.read_parquet(parquet_file)
+                # Check if already processed
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM processed_files WHERE filename = %s",
+                        (file_name,),
+                    )
+                    if cur.fetchone():
+                        print(f"  Skipping {file_name} (already done)")
+                        conn.close()
+                        break
 
-        if test_mode:
-            df = df.head(100)
-            print(f"  TEST MODE: Limited to {len(df)} rows")
+                print(f"  Loading parquet file...")
+                df = pd.read_parquet(parquet_file)
 
-        print(f"  Loaded {len(df)} rows")
+                if test_mode:
+                    df = df.head(100)
+                    print(f"  TEST MODE: Limited to {len(df)} rows")
 
-        batch_size = 1000
-        for batch_start in range(0, len(df), batch_size):
-            batch_df = df.iloc[batch_start : batch_start + batch_size]
+                print(f"  Processing {len(df)} rows")
 
-            records = [
-                (
-                    str(row["id"]),
-                    row["clean_text"],
-                    str(row["author"]),
-                    str(row["timestamp"]),
-                    str(row["type"]),
-                    row["embedding"].tolist(),
-                )
-                for _, row in batch_df.iterrows()
-            ]
+                # Start transaction for this file
+                conn.execute("BEGIN")
 
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    INSERT INTO hn_documents (id, clean_text, author, timestamp, type, embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (id) DO NOTHING
-                    """,
-                    records,
-                )
+                batch_size = 1000
+                file_loaded = 0
+                for batch_start in range(0, len(df), batch_size):
+                    batch_df = df.iloc[batch_start : batch_start + batch_size]
+
+                    records = [
+                        (
+                            str(row["id"]),
+                            row["clean_text"],
+                            str(row["author"]),
+                            str(row["timestamp"]),
+                            str(row["type"]),
+                            row["embedding"].tolist(),
+                        )
+                        for _, row in batch_df.iterrows()
+                    ]
+
+                    with conn.cursor() as cur:
+                        cur.executemany(
+                            """
+                            INSERT INTO hn_documents (id, clean_text, author, timestamp, type, embedding)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (id) DO NOTHING
+                            """,
+                            records,
+                        )
+
+                    file_loaded += len(records)
+                    total_loaded += len(records)
+                    print(f"    Batch: {file_loaded}/{len(df)} | Total: {total_loaded}")
+
+                # Mark file as processed
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO processed_files (filename) VALUES (%s) ON CONFLICT DO NOTHING",
+                        (file_name,),
+                    )
+
+                # Commit entire file at once
                 conn.commit()
+                print(f"  ✅ Committed {file_name} ({file_loaded} records)")
+                conn.close()
+                break  # Success - exit retry loop
 
-            total_loaded += len(records)
-            print(f"  Total loaded: {total_loaded}")
+            except Exception as e:
+                print(f"  ❌ Error (attempt {retry + 1}/{max_retries}): {e}")
+                try:
+                    conn.rollback()
+                    conn.close()
+                except:
+                    pass  # Connection might already be closed
 
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO processed_files (filename) VALUES (%s) ON CONFLICT DO NOTHING",
-                (file_name,),
-            )
-            conn.commit()
-        print(f"  Marked {file_name} as done")
+                if retry < max_retries - 1:
+                    print(f"  🔄 Retrying in 5 seconds...")
+                    import time
+
+                    time.sleep(5)
+                else:
+                    print(
+                        f"  ❌ Failed after {max_retries} attempts - skipping {file_name}"
+                    )
+                    continue
 
     print(f"\n✅ Successfully loaded {total_loaded} documents into PostgreSQL")
 
+    # Final count with fresh connection
+    conn = get_connection()
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM hn_documents")
         count = cur.fetchone()[0]
         print(f"Total documents in database: {count}")
-
     conn.close()
 
 

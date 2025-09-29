@@ -68,7 +68,29 @@ def hn_search_rag(query: str):
 
 
 def create_interface():
-    with gr.Blocks(title="🔎 Hacker News RAG Search") as demo:
+    with gr.Blocks(
+        title="🔎 Hacker News RAG Search",
+        head="""
+        <script>
+        window.updateUrlWithSearch = function(query) {
+            query = query || '';
+            console.log('🔗 Updating URL with:', query);
+
+            const params = new URLSearchParams();
+            if (query && query.trim()) {
+                params.set('q', query.trim());
+            }
+
+            const newUrl = params.toString() ?
+                window.location.pathname + '?' + params.toString() :
+                window.location.pathname;
+
+            window.history.pushState({}, '', newUrl);
+            console.log('🔗 Updated URL to:', newUrl);
+        };
+        </script>
+        """,
+    ) as demo:
         gr.Markdown(
             """
             # 🔎 Hacker News RAG Search
@@ -81,6 +103,7 @@ def create_interface():
             label="Your Question",
             placeholder="What do people think about Rust vs Go?",
             lines=2,
+            elem_id="query_input",
         )
 
         search_button = gr.Button("🔍 Search", variant="primary")
@@ -94,11 +117,63 @@ def create_interface():
         with gr.Accordion("📚 Source Comments", open=False):
             sources_output = gr.Markdown(value="")
 
+        # Hidden HTML component for JavaScript execution
+        html_output = gr.HTML(visible=False)
+
+        def search_and_update_url(query: str):
+            """Search and update URL in browser."""
+            query = query or ""
+            for result in hn_search_rag(query):
+                yield result + ("",)  # Add empty string for HTML output
+
+        # Set up search action
         search_button.click(
-            fn=hn_search_rag,
+            fn=search_and_update_url,
             inputs=[query_input],
-            outputs=[progress_output, answer_output, sources_output],
+            outputs=[progress_output, answer_output, sources_output, html_output],
             show_progress="full",
+        )
+
+        # Add JavaScript click handler to update URL
+        search_button.click(
+            fn=None,
+            inputs=[query_input],
+            outputs=[],
+            js="(query) => { console.log('Updating URL:', query); window.updateUrlWithSearch(query); }",
+        )
+
+        # Handle URL parameters and auto-search on load
+        def load_and_search_from_url(request: gr.Request):
+            """Load query parameters from URL and auto-search if present."""
+            if request:
+                query = request.query_params.get("q", "")
+                print(f"📎 Loading from URL: q='{query}'")
+
+                if query:
+                    print(f"🔍 Auto-searching for: {query}")
+                    # Start the search immediately and return results
+                    results = list(hn_search_rag(query))
+                    if results:
+                        # Get the final result
+                        progress, answer, sources = results[-1]
+                        return query, progress, answer, sources, ""
+                    else:
+                        return query, "Search completed", "", "", ""
+                else:
+                    return "", "Ready to search...", "", "", ""
+            return "", "Ready to search...", "", "", ""
+
+        # Set up load handler to populate fields and auto-search from URL
+        demo.load(
+            fn=load_and_search_from_url,
+            inputs=[],
+            outputs=[
+                query_input,
+                progress_output,
+                answer_output,
+                sources_output,
+                html_output,
+            ],
         )
 
     return demo
@@ -108,6 +183,10 @@ demo = create_interface()
 
 if __name__ == "__main__":
     print("🔎 Starting HN RAG Search Web Interface...")
+    print("✨ Features:")
+    print("  • URL parameter support: ?q=query")
+    print("  • Auto-search from URL parameters")
+    print()
     demo.launch(
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 7860)),
