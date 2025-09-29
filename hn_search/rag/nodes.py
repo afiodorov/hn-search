@@ -4,6 +4,7 @@ import psycopg
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from pgvector.psycopg import register_vector
+from psycopg_pool import ConnectionPool
 from sentence_transformers import SentenceTransformer
 
 from hn_search.cache_config import (
@@ -18,6 +19,36 @@ from hn_search.db_config import get_db_config
 from .state import RAGState, SearchResult
 
 load_dotenv()
+
+# Initialize connection pool (singleton)
+_connection_pool = None
+
+
+def get_connection_pool():
+    global _connection_pool
+    if _connection_pool is None:
+        db_config = get_db_config()
+        # Create connection string from config
+        conn_string = f"host={db_config['host']} port={db_config['port']} dbname={db_config['dbname']} user={db_config['user']} password={db_config['password']}"
+        _connection_pool = ConnectionPool(
+            conn_string,
+            min_size=1,
+            max_size=10,
+            max_idle=300,  # Close connections idle for 5 minutes
+            max_lifetime=3600,  # Replace connections after 1 hour
+            kwargs={
+                "prepare_threshold": None,  # Disable prepared statements for pgvector
+                "keepalives": 1,  # Enable TCP keepalive
+                "keepalives_idle": 30,  # Send keepalive after 30s idle
+                "keepalives_interval": 10,  # Interval between keepalives
+                "keepalives_count": 5,  # Failed keepalives before declaring dead
+            },
+            configure=lambda conn: register_vector(
+                conn
+            ),  # Register vector on each connection
+            check=ConnectionPool.check_connection,  # Check connection health before use
+        )
+    return _connection_pool
 
 
 def retrieve_node(state: RAGState) -> RAGState:
@@ -66,57 +97,49 @@ def retrieve_node(state: RAGState) -> RAGState:
 
         query_embedding = model.encode([query])[0]
 
-        db_config = get_db_config()
-        print(f"Connecting to database at {db_config['host']}:{db_config['port']}")
+        # Get connection from pool
+        pool = get_connection_pool()
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, clean_text, author, timestamp, type,
+                           embedding <=> %s::vector AS distance
+                    FROM hn_documents
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (query_embedding.tolist(), query_embedding.tolist(), n_results),
+                )
 
-        conn = psycopg.connect(**db_config)
-        print("Database connection established")
+                results = cur.fetchall()
+                search_results = []
+                cache_data = []
 
-        register_vector(conn)
-        print("Vector extension registered")
-
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, clean_text, author, timestamp, type,
-                       embedding <=> %s::vector AS distance
-                FROM hn_documents
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (query_embedding.tolist(), query_embedding.tolist(), n_results),
-            )
-
-            results = cur.fetchall()
-            search_results = []
-            cache_data = []
-
-            for doc_id, document, author, timestamp, doc_type, distance in results:
-                search_results.append(
-                    SearchResult(
-                        id=doc_id,
-                        author=author,
-                        type=doc_type,
-                        text=document,
-                        timestamp=timestamp,
-                        distance=distance,
+                for doc_id, document, author, timestamp, doc_type, distance in results:
+                    search_results.append(
+                        SearchResult(
+                            id=doc_id,
+                            author=author,
+                            type=doc_type,
+                            text=document,
+                            timestamp=timestamp,
+                            distance=distance,
+                        )
                     )
-                )
-                # Prepare for caching
-                cache_data.append(
-                    {
-                        "id": doc_id,
-                        "text": document,
-                        "author": author,
-                        "timestamp": timestamp.isoformat()
-                        if hasattr(timestamp, "isoformat")
-                        else str(timestamp),
-                        "type": doc_type,
-                        "distance": float(distance),
-                    }
-                )
-
-        conn.close()
+                    # Prepare for caching
+                    cache_data.append(
+                        {
+                            "id": doc_id,
+                            "text": document,
+                            "author": author,
+                            "timestamp": timestamp.isoformat()
+                            if hasattr(timestamp, "isoformat")
+                            else str(timestamp),
+                            "type": doc_type,
+                            "distance": float(distance),
+                        }
+                    )
 
         # Cache the results
         if cache_data:

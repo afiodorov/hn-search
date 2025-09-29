@@ -91,9 +91,9 @@ def get_cached_vector_search(query: str, k: int = 10) -> Optional[List[Dict[str,
 
 
 def cache_vector_search(
-    query: str, results: List[Dict[str, Any]], k: int = 10, ttl: int = 3600
+    query: str, results: List[Dict[str, Any]], k: int = 10, ttl: int = 21600
 ):
-    """Cache vector search results with TTL (default 1 hour)."""
+    """Cache vector search results with TTL (default 6 hours)."""
     if not redis_client:
         return
     try:
@@ -125,8 +125,8 @@ def get_cached_answer(query: str, context: str) -> Optional[str]:
     return None
 
 
-def cache_answer(query: str, context: str, answer: str, ttl: int = 7200):
-    """Cache LLM answer with TTL (default 2 hours)."""
+def cache_answer(query: str, context: str, answer: str, ttl: int = 21600):
+    """Cache LLM answer with TTL (default 6 hours)."""
     if not redis_client:
         return
     try:
