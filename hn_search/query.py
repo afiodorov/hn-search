@@ -5,16 +5,17 @@ from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
 from hn_search.common import get_device
+from hn_search.db_config import get_db_config
 
 
 def query(
     query_text: str,
     n_results: int = 10,
-    db_host: str = "localhost",
-    db_port: int = 5432,
-    db_name: str = "hn_search",
-    db_user: str = "postgres",
-    db_password: str = "postgres",
+    db_host: str = None,
+    db_port: int = None,
+    db_name: str = None,
+    db_user: str = None,
+    db_password: str = None,
 ):
     device = get_device()
     print(f"Loading embedding model on {device}...", file=sys.stderr)
@@ -26,13 +27,19 @@ def query(
     query_embedding = model.encode([query_text])[0]
 
     print("Querying PostgreSQL...", file=sys.stderr)
-    conn = psycopg.connect(
-        host=db_host,
-        port=db_port,
-        dbname=db_name,
-        user=db_user,
-        password=db_password,
-    )
+    # Use Railway/environment variables if individual params not provided
+    if not all([db_host, db_port, db_name, db_user, db_password]):
+        db_config = get_db_config()
+    else:
+        db_config = {
+            "host": db_host,
+            "port": db_port,
+            "dbname": db_name,
+            "user": db_user,
+            "password": db_password,
+        }
+
+    conn = psycopg.connect(**db_config)
     register_vector(conn)
 
     with conn.cursor() as cur:

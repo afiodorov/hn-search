@@ -7,6 +7,7 @@ from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
 from hn_search.common import get_device
+from hn_search.db_config import get_db_config
 
 from .state import RAGState, SearchResult
 
@@ -26,13 +27,8 @@ def retrieve_node(state: RAGState) -> RAGState:
 
     query_embedding = model.encode([query])[0]
 
-    conn = psycopg.connect(
-        host="localhost",
-        port=5432,
-        dbname="hn_search",
-        user="postgres",
-        password="postgres",
-    )
+    db_config = get_db_config()
+    conn = psycopg.connect(**db_config)
     register_vector(conn)
 
     with conn.cursor() as cur:

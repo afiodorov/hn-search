@@ -1,3 +1,4 @@
+import sys
 from glob import glob
 from pathlib import Path
 
@@ -135,7 +136,5 @@ def init_db_from_precomputed(
 
 
 if __name__ == "__main__":
-    import sys
-
     test_mode = "--test" in sys.argv
     init_db_from_precomputed(test_mode=test_mode)
