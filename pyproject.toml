@@ -4,15 +4,17 @@ version = "0.1.0"
 description = "Hacker News search using vector embeddings"
 requires-python = ">=3.13"
 dependencies = [
-    "chromadb",
     "sentence-transformers",
-    "html2text",
     "torch",
     "langgraph",
     "langchain",
     "langchain-openai",
     "python-dotenv",
     "gradio",
+    "pyarrow",
+    "pandas",
+    "psycopg[binary]>=3.0",
+    "pgvector",
 ]
 
 [project.optional-dependencies]

@@ -1,49 +1,69 @@
 import sys
 
-from hn_search.common import COLLECTION_NAME, get_client, get_device, get_model
+import psycopg
+from pgvector.psycopg import register_vector
+from sentence_transformers import SentenceTransformer
+
+from hn_search.common import get_device
 
 
 def query(
     query_text: str,
     n_results: int = 10,
-    chroma_host: str = "localhost",
-    chroma_port: int = 8000,
+    db_host: str = "localhost",
+    db_port: int = 5432,
+    db_name: str = "hn_search",
+    db_user: str = "postgres",
+    db_password: str = "postgres",
 ):
-    client = get_client(host=chroma_host, port=chroma_port)
-
     device = get_device()
     print(f"Loading embedding model on {device}...", file=sys.stderr)
-    model = get_model(device=device)
-
-    print("Encoding query...", file=sys.stderr)
-    query_embedding = model.encode([query_text])
-
-    print("Querying ChromaDB...", file=sys.stderr)
-    collection = client.get_collection(name=COLLECTION_NAME)
-
-    results = collection.query(
-        query_embeddings=query_embedding.tolist(), n_results=n_results
+    model = SentenceTransformer(
+        "sentence-transformers/all-mpnet-base-v2", device=device
     )
 
-    print("Fetching results...\n", file=sys.stderr)
-    sys.stdout.flush()
+    print("Encoding query...", file=sys.stderr)
+    query_embedding = model.encode([query_text])[0]
 
-    for i, (doc_id, document, metadata, distance) in enumerate(
-        zip(
-            results["ids"][0],
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
-        ),
-        1,
-    ):
-        print(f"=== Result {i} (distance: {distance:.4f}) ===")
-        print(f"ID: {doc_id}")
-        print(f"Author: {metadata['author']}")
-        print(f"Timestamp: {metadata['timestamp']}")
-        print(f"Text: {document}")
-        print()
+    print("Querying PostgreSQL...", file=sys.stderr)
+    conn = psycopg.connect(
+        host=db_host,
+        port=db_port,
+        dbname=db_name,
+        user=db_user,
+        password=db_password,
+    )
+    register_vector(conn)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, clean_text, author, timestamp, type,
+                   embedding <=> %s::vector AS distance
+            FROM hn_documents
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """,
+            (query_embedding.tolist(), query_embedding.tolist(), n_results),
+        )
+
+        print("Fetching results...\n", file=sys.stderr)
         sys.stdout.flush()
+
+        results = cur.fetchall()
+        for i, (doc_id, document, author, timestamp, doc_type, distance) in enumerate(
+            results, 1
+        ):
+            print(f"=== Result {i} (distance: {distance:.4f}) ===")
+            print(f"ID: {doc_id}")
+            print(f"Author: {author}")
+            print(f"Date: {timestamp}")
+            print(f"Type: {doc_type}")
+            print(f"Text: {document}")
+            print()
+            sys.stdout.flush()
+
+    conn.close()
 
 
 if __name__ == "__main__":

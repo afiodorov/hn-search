@@ -39,9 +39,10 @@ def hn_search_rag(query: str):
 
             if "search_results" in result_state and result_state["search_results"]:
                 sources = []
-                for i, r in enumerate(result_state["search_results"][:5], 1):
+                for i, r in enumerate(result_state["search_results"], 1):
+                    hn_link = f"https://news.ycombinator.com/item?id={r['id']}"
                     sources.append(
-                        f"**[{i}]** {r['author']} ({r['timestamp']})\n\n{r['text'][:200]}..."
+                        f"**[{i}]** [{r['author']}]({hn_link}) ({r['timestamp']})\n\n{r['text'][:200]}..."
                     )
                 current_sources = "\n\n---\n\n".join(sources)
                 yield "\n".join(progress_log), current_answer, current_sources

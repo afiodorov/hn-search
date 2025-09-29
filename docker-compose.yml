@@ -1,10 +1,12 @@
 services:
-  chromadb:
-    image: chromadb/chroma:latest
+  postgres:
+    image: pgvector/pgvector:pg17
     ports:
-      - "8000:8000"
+      - "5432:5432"
     volumes:
-      - ./chroma_data:/chroma/chroma
+      - ./postgres_data:/var/lib/postgresql/data
     environment:
-      - IS_PERSISTENT=TRUE
-      - ANONYMIZED_TELEMETRY=FALSE
+      - POSTGRES_DB=hn_search
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    shm_size: 2g
