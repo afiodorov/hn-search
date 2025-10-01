@@ -105,7 +105,7 @@ def retrieve_node(state: RAGState) -> RAGState:
                     """
                     SELECT id, clean_text, author, timestamp, type,
                            embedding <=> %s::vector AS distance
-                    FROM hn_documents
+                    FROM hn_documents_2023_01
                     ORDER BY embedding <=> %s::vector
                     LIMIT %s
                     """,
