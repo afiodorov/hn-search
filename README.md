@@ -87,7 +87,6 @@ Hosted at [hn.fiodorov.es](https://hn.fiodorov.es)
 ### Infrastructure
 - **Compute**: Railway (PostgreSQL + Redis) / Local development
 - **Deployment**: Docker-ready with docker-compose.yml
-- **CI/CD**: GitHub Actions (future)
 
 ## 📊 Dataset
 
@@ -216,6 +215,9 @@ uv run --extra dev python misc/fetch_and_embed_new_comments.py
 
 ### 4. Generate Embeddings (Batch)
 
+A single 5090 Nvidia was rented from vast.ai to compute all historical
+embeddings for a few dollars.
+
 ```bash
 # Process raw parquet files and generate embeddings
 uv run python misc/generate_embeddings_gpu.py
@@ -240,7 +242,7 @@ LIMIT 10
 ```
 
 **Performance Optimizations**:
-- IVFFlat index for approximate nearest neighbor search (future)
+- HNSW index for approximate nearest neighbor search
 - Redis caching layer reduces repeated queries to <100ms
 - Connection pooling with psycopg3
 - Partitioned tables for efficient index scans
@@ -252,7 +254,7 @@ The RAG system uses LangGraph to orchestrate a two-node workflow:
 1. **Retrieve Node**:
    - Encodes user query with sentence-transformers
    - Performs vector search in PostgreSQL
-   - Returns top 5 most relevant comments
+   - Returns top 10 most relevant comments
 
 2. **Answer Node**:
    - Formats retrieved comments as context
@@ -290,13 +292,12 @@ Answer:"""
 ## 📈 Performance & Scale
 
 ### Current Scale
-- **Documents**: ~2.7M Hacker News comments
+- **Documents**: ~9.4M Hacker News comments
 - **Storage**: ~40 GB (including embeddings)
-- **Index Size**: ~10 GB (vector index)
 - **Query Latency**:
-  - Cold query: ~2-3s (embedding + search)
+  - Cold query: ~30s (embedding + search)
   - Cached query: ~50ms
-  - RAG end-to-end: ~5-10s (including LLM generation)
+  - RAG end-to-end: ~60s (including LLM generation)
 
 ### Optimization Techniques
 1. **Caching**: Redis cache for vector search results (90%+ hit rate for common queries)
