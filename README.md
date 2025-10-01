@@ -390,26 +390,6 @@ This project demonstrates:
 6. **Cloud Integration**: BigQuery public datasets, Railway deployment, Redis caching
 7. **GPU Optimization**: MPS/CUDA support for efficient embedding generation
 
-## 🚧 Future Improvements
-
-### Short Term
-- [ ] Add HNSW index for faster approximate nearest neighbor search
-- [ ] Implement query rewriting for better retrieval
-- [ ] Add user feedback loop to improve results
-- [ ] Deploy to production with auto-scaling
-
-### Medium Term
-- [ ] Multi-query retrieval with reciprocal rank fusion
-- [ ] Fine-tune embeddings on HN-specific data
-- [ ] Add hybrid search (vector + BM25)
-- [ ] Implement query expansion with LLM
-
-### Long Term
-- [ ] Real-time indexing of new HN comments via Algolia/RSS
-- [ ] Multi-modal search (include linked articles)
-- [ ] Personalized search based on user preferences
-- [ ] Community-driven relevance ratings
-
 ## 📚 References
 
 - [pgvector: Open-source vector similarity search for Postgres](https://github.com/pgvector/pgvector)
