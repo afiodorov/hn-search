@@ -33,6 +33,9 @@ torchaudio = { index = "pytorch-cpu", marker = "sys_platform == 'linux'" }
 
 [project.optional-dependencies]
 dev = [
+    "db-dtypes>=1.4.3",
+    "google-cloud-bigquery>=3.38.0",
+    "html2text>=2025.4.15",
     "ruff",
 ]
 
