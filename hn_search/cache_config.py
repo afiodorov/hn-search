@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import redis
 from dotenv import load_dotenv
@@ -16,6 +17,24 @@ from hn_search.logging_config import get_logger
 load_dotenv()
 
 logger = get_logger(__name__)
+
+
+def sanitize_url(url: str) -> str:
+    """Sanitize URL to hide credentials."""
+    try:
+        parsed = urlparse(url)
+        if parsed.password:
+            # Replace password with asterisks
+            sanitized = parsed._replace(
+                netloc=f"{parsed.username}:***@{parsed.hostname}:{parsed.port}"
+                if parsed.port
+                else f"{parsed.username}:***@{parsed.hostname}"
+            )
+            return sanitized.geturl()
+        return url
+    except Exception:
+        return "redis://***"
+
 
 # Redis configuration
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -30,7 +49,7 @@ try:
     cache = RedisCache(redis_client)
     set_llm_cache(cache)
 
-    logger.info(f"✅ Redis cache initialized at {REDIS_URL}")
+    logger.info(f"✅ Redis cache initialized at {sanitize_url(REDIS_URL)}")
 except Exception as e:
     logger.warning(f"⚠️ Redis cache not available: {e}")
     logger.warning("🔄 Running without cache")
