@@ -5,18 +5,16 @@ import json
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from hn_search.cache_config import redis_client
-
 
 class JobManager:
     """Manages RAG query jobs to prevent duplicate processing."""
 
     def __init__(self, redis_client=None):
         self.redis = redis_client
-        self.job_timeout = 600  # 10 minutes
+        self.job_timeout = 180  # 3 minutes (reduced from 10)
         self.result_ttl = 21600  # 6 hours
         self.poll_interval = 0.5  # 500ms
-        self.max_poll_time = 300  # 5 minutes
+        self.max_poll_time = 120  # 2 minutes (reduced from 5)
 
     def get_job_id(self, query: str) -> str:
         """Generate a unique job ID from query text."""
@@ -37,10 +35,18 @@ class JobManager:
         status_key = f"job:{job_id}:status"
 
         try:
-            # Check if already completed
+            # Check current status
             status = self.redis.get(status_key)
+
             if status == b"completed":
+                # Already completed - don't claim
                 return False, job_id
+
+            if status == b"failed":
+                # Failed job - allow immediate retry by deleting it
+                self.redis.delete(status_key)
+                self.redis.delete(f"job:{job_id}:error")
+                print(f"🔄 Clearing failed job {job_id[:8]} for retry")
 
             # Try to claim with atomic SET NX (only if not exists)
             claimed = self.redis.set(
@@ -106,7 +112,25 @@ class JobManager:
                 return None
 
         print(f"⏱️ Timeout waiting for job {job_id[:8]}")
+        # Force-clear the stuck job to allow retry
+        self.clear_job(job_id)
         return None
+
+    def clear_job(self, job_id: str):
+        """Force-clear a stuck job to allow retry."""
+        if not self.redis:
+            return
+
+        try:
+            status_key = f"job:{job_id}:status"
+            result_key = f"job:{job_id}:result"
+            error_key = f"job:{job_id}:error"
+            progress_key = f"job:{job_id}:progress"
+
+            self.redis.delete(status_key, result_key, error_key, progress_key)
+            print(f"🗑️ Cleared stuck job {job_id[:8]}")
+        except Exception as e:
+            print(f"⚠️ Error clearing job {job_id[:8]}: {e}")
 
     def store_result(self, job_id: str, result: Dict[str, Any]):
         """Store job result and mark as completed."""

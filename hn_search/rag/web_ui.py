@@ -30,7 +30,7 @@ def hn_search_rag(query: str):
         yield "\n".join(progress_log), "", ""
 
         # Poll for progress updates from the processing job
-        timeout = 300  # 5 minutes
+        timeout = job_manager.max_poll_time
         start_time = time.time()
         last_progress = ""
 
