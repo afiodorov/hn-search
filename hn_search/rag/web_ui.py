@@ -272,35 +272,38 @@ def create_interface():
             js="(query) => { console.log('Updating URL:', query); window.updateUrlWithSearch(query); }",
         )
 
-        # Handle URL parameters and auto-search on load
-        def load_and_search_from_url(request: gr.Request):
-            """Load query parameters from URL and auto-search if present."""
+        # Handle URL parameters - just populate fields, no search yet
+        def load_from_url(request: gr.Request):
+            """Load query parameters from URL and populate fields."""
             recent_queries = _format_recent_queries()
 
             if request:
                 query = request.query_params.get("q", "")
                 logger.info(f"📎 Loading from URL: q='{query}'")
+                return query, recent_queries
+            return "", recent_queries
 
-                if query:
-                    logger.info(f"🔍 Auto-searching for: {query}")
-                    # Yield initial state with query and recent queries immediately
-                    yield query, "Ready to search...", "", "", recent_queries, ""
+        # Auto-search if query is present (triggered after load)
+        def auto_search_from_url(query: str):
+            """Auto-search if query parameter was provided."""
+            if query and query.strip():
+                logger.info(f"🔍 Auto-searching for: {query}")
+                for progress, answer, sources, recent in hn_search_rag(query):
+                    yield progress, answer, sources, recent, ""
+            # If no query, do nothing (don't yield anything to avoid loading state)
 
-                    # Then stream search results
-                    for progress, answer, sources, recent in hn_search_rag(query):
-                        yield query, progress, answer, sources, recent, ""
-                    return
-                else:
-                    yield "", "Ready to search...", "", "", recent_queries, ""
-                    return
-            yield "", "Ready to search...", "", "", recent_queries, ""
-
-        # Set up load handler to populate fields and auto-search from URL
+        # Set up load handler to populate query input and recent queries immediately
         demo.load(
-            fn=load_and_search_from_url,
+            fn=load_from_url,
             inputs=[],
+            outputs=[query_input, recent_output],
+        )
+
+        # Then auto-trigger search if query is present
+        demo.load(
+            fn=auto_search_from_url,
+            inputs=[query_input],
             outputs=[
-                query_input,
                 progress_output,
                 answer_output,
                 sources_output,
