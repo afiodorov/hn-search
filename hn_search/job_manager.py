@@ -5,6 +5,10 @@ import json
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from hn_search.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class JobManager:
     """Manages RAG query jobs to prevent duplicate processing."""
@@ -46,7 +50,7 @@ class JobManager:
                 # Failed job - allow immediate retry by deleting it
                 self.redis.delete(status_key)
                 self.redis.delete(f"job:{job_id}:error")
-                print(f"🔄 Clearing failed job {job_id[:8]} for retry")
+                logger.info(f"🔄 Clearing failed job {job_id[:8]} for retry")
 
             # Try to claim with atomic SET NX (only if not exists)
             claimed = self.redis.set(
@@ -59,7 +63,7 @@ class JobManager:
             return bool(claimed), job_id
 
         except Exception as e:
-            print(f"⚠️ Job claim error: {e}")
+            logger.exception(f"⚠️ Job claim error: {e}")
             # Fallback: allow processing if Redis fails
             return True, job_id
 
@@ -81,7 +85,9 @@ class JobManager:
         status_key = f"job:{job_id}:status"
         error_key = f"job:{job_id}:error"
 
-        print(f"⏳ Waiting for job {job_id[:8]}... (another request is processing)")
+        logger.info(
+            f"⏳ Waiting for job {job_id[:8]}... (another request is processing)"
+        )
 
         while time.time() - start_time < timeout:
             try:
@@ -90,28 +96,31 @@ class JobManager:
                 if status == b"completed":
                     result = self.redis.get(result_key)
                     if result:
-                        print(f"✅ Job {job_id[:8]} completed by another request")
+                        elapsed = time.time() - start_time
+                        logger.info(
+                            f"✅ Job {job_id[:8]} completed by another request (waited {elapsed:.2f}s)"
+                        )
                         return json.loads(result)
 
                 elif status == b"failed":
                     error = self.redis.get(error_key)
                     error_msg = error.decode() if error else "Unknown error"
-                    print(f"❌ Job {job_id[:8]} failed: {error_msg}")
+                    logger.error(f"❌ Job {job_id[:8]} failed: {error_msg}")
                     return None
 
                 elif status is None:
                     # Job disappeared (expired or deleted)
-                    print(f"⚠️ Job {job_id[:8]} disappeared")
+                    logger.warning(f"⚠️ Job {job_id[:8]} disappeared")
                     return None
 
                 # Still processing - wait and retry
                 time.sleep(self.poll_interval)
 
             except Exception as e:
-                print(f"⚠️ Error polling job {job_id[:8]}: {e}")
+                logger.exception(f"⚠️ Error polling job {job_id[:8]}: {e}")
                 return None
 
-        print(f"⏱️ Timeout waiting for job {job_id[:8]}")
+        logger.warning(f"⏱️ Timeout waiting for job {job_id[:8]} after {timeout}s")
         # Force-clear the stuck job to allow retry
         self.clear_job(job_id)
         return None
@@ -128,9 +137,9 @@ class JobManager:
             progress_key = f"job:{job_id}:progress"
 
             self.redis.delete(status_key, result_key, error_key, progress_key)
-            print(f"🗑️ Cleared stuck job {job_id[:8]}")
+            logger.info(f"🗑️ Cleared stuck job {job_id[:8]}")
         except Exception as e:
-            print(f"⚠️ Error clearing job {job_id[:8]}: {e}")
+            logger.exception(f"⚠️ Error clearing job {job_id[:8]}: {e}")
 
     def store_result(self, job_id: str, result: Dict[str, Any]):
         """Store job result and mark as completed."""
@@ -147,10 +156,10 @@ class JobManager:
             # Update status to completed
             self.redis.setex(status_key, self.result_ttl, "completed")
 
-            print(f"💾 Stored result for job {job_id[:8]}")
+            logger.info(f"💾 Stored result for job {job_id[:8]}")
 
         except Exception as e:
-            print(f"⚠️ Error storing result for job {job_id[:8]}: {e}")
+            logger.exception(f"⚠️ Error storing result for job {job_id[:8]}: {e}")
 
     def store_error(self, job_id: str, error_message: str):
         """Store job error and mark as failed."""
@@ -164,10 +173,10 @@ class JobManager:
             self.redis.setex(error_key, 3600, error_message)  # 1 hour TTL
             self.redis.setex(status_key, 3600, "failed")
 
-            print(f"💾 Stored error for job {job_id[:8]}")
+            logger.info(f"💾 Stored error for job {job_id[:8]}")
 
         except Exception as e:
-            print(f"⚠️ Error storing error for job {job_id[:8]}: {e}")
+            logger.exception(f"⚠️ Error storing error for job {job_id[:8]}: {e}")
 
     def update_progress(self, job_id: str, progress: str):
         """Update job progress for streaming updates."""

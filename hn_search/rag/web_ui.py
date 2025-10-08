@@ -5,11 +5,14 @@ import gradio as gr
 
 from hn_search.cache_config import redis_client
 from hn_search.job_manager import JobManager
+from hn_search.logging_config import get_logger
 
 from .graph import create_rag_workflow
 
 # Initialize job manager
 job_manager = JobManager(redis_client)
+
+logger = get_logger(__name__)
 
 
 def hn_search_rag(query: str):
@@ -210,10 +213,10 @@ def create_interface():
             """Load query parameters from URL and auto-search if present."""
             if request:
                 query = request.query_params.get("q", "")
-                print(f"📎 Loading from URL: q='{query}'")
+                logger.info(f"📎 Loading from URL: q='{query}'")
 
                 if query:
-                    print(f"🔍 Auto-searching for: {query}")
+                    logger.info(f"🔍 Auto-searching for: {query}")
                     # Start the search immediately and return results
                     results = list(hn_search_rag(query))
                     if results:
@@ -245,11 +248,10 @@ def create_interface():
 demo = create_interface()
 
 if __name__ == "__main__":
-    print("🔎 Starting HN RAG Search Web Interface...")
-    print("✨ Features:")
-    print("  • URL parameter support: ?q=query")
-    print("  • Auto-search from URL parameters")
-    print()
+    logger.info("🔎 Starting HN RAG Search Web Interface...")
+    logger.info("✨ Features:")
+    logger.info("  • URL parameter support: ?q=query")
+    logger.info("  • Auto-search from URL parameters")
     demo.launch(
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 7860)),

@@ -10,8 +10,12 @@ from dotenv import load_dotenv
 from langchain.globals import set_llm_cache
 from langchain_community.cache import RedisCache
 
+from hn_search.logging_config import get_logger
+
 # Load environment variables
 load_dotenv()
+
+logger = get_logger(__name__)
 
 # Redis configuration
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -26,10 +30,10 @@ try:
     cache = RedisCache(redis_client)
     set_llm_cache(cache)
 
-    print(f"✅ Redis cache initialized at {REDIS_URL}")
+    logger.info(f"✅ Redis cache initialized at {REDIS_URL}")
 except Exception as e:
-    print(f"⚠️ Redis cache not available: {e}")
-    print("🔄 Running without cache")
+    logger.warning(f"⚠️ Redis cache not available: {e}")
+    logger.warning("🔄 Running without cache")
     redis_client = None
 
 
@@ -145,6 +149,6 @@ def clear_cache(pattern: str = "*"):
         keys = redis_client.keys(pattern)
         if keys:
             redis_client.delete(*keys)
-            print(f"🗑️ Cleared {len(keys)} cache entries")
+            logger.info(f"🗑️ Cleared {len(keys)} cache entries")
     except Exception as e:
-        print(f"❌ Error clearing cache: {e}")
+        logger.exception(f"❌ Error clearing cache: {e}")
