@@ -9,22 +9,22 @@ Usage:
     uv run python misc/fetch_and_embed_new_comments.py [--resume] [--skip-fetch] [--skip-embed] [--skip-upsert]
 """
 
-import os
-import json
 import argparse
-from pathlib import Path
+import json
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Tuple
 
-import pandas as pd
-import psycopg
-from dotenv import load_dotenv
-from google.cloud import bigquery
-import torch
-from sentence_transformers import SentenceTransformer
 import html2text
 import numpy as np
+import pandas as pd
+import psycopg
+import torch
+from dotenv import load_dotenv
+from google.cloud import bigquery
 from pgvector.psycopg import register_vector
+from sentence_transformers import SentenceTransformer
 
 from hn_search.db_config import get_db_config
 
@@ -37,7 +37,7 @@ def load_state() -> dict:
     """Load state from file"""
     state_path = Path(STATE_FILE)
     if state_path.exists():
-        with open(state_path, 'r') as f:
+        with open(state_path, "r") as f:
             return json.load(f)
     return {}
 
@@ -46,7 +46,7 @@ def save_state(state: dict):
     """Save state to file"""
     state_path = Path(STATE_FILE)
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(state_path, 'w') as f:
+    with open(state_path, "w") as f:
         json.dump(state, f, indent=2)
     print(f"💾 State saved to {state_path}")
 
@@ -106,7 +106,9 @@ def get_max_id_from_partition(table_name):
     return max_id
 
 
-def fetch_from_bigquery(min_id, output_dir="data/raw", state=None, project=None) -> Optional[Path]:
+def fetch_from_bigquery(
+    min_id, output_dir="data/raw", state=None, project=None
+) -> Optional[Path]:
     """Fetch new comments from BigQuery starting after min_id"""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -162,7 +164,7 @@ def fetch_from_bigquery(min_id, output_dir="data/raw", state=None, project=None)
     filepath = output_path / filename
 
     # Save atomically with temp file
-    temp_filepath = filepath.with_suffix('.parquet.tmp')
+    temp_filepath = filepath.with_suffix(".parquet.tmp")
     df.to_parquet(temp_filepath, index=False)
     temp_filepath.rename(filepath)
 
@@ -171,7 +173,9 @@ def fetch_from_bigquery(min_id, output_dir="data/raw", state=None, project=None)
     return filepath
 
 
-def generate_embeddings_mps(parquet_file, state=None) -> Tuple[Optional[Path], Optional[pd.DataFrame]]:
+def generate_embeddings_mps(
+    parquet_file, state=None
+) -> Tuple[Optional[Path], Optional[pd.DataFrame]]:
     """Generate embeddings using MPS (Mac GPU) - saves progress incrementally"""
     output_file = Path(str(parquet_file).replace(".parquet", "_embedded.parquet"))
 
@@ -193,8 +197,7 @@ def generate_embeddings_mps(parquet_file, state=None) -> Tuple[Optional[Path], O
         print("⚠️  Using CPU (no GPU available)")
 
     model = SentenceTransformer(
-        "sentence-transformers/all-mpnet-base-v2",
-        device=device
+        "sentence-transformers/all-mpnet-base-v2", device=device
     )
 
     print(f"\n🔄 Loading {parquet_file}")
@@ -218,18 +221,22 @@ def generate_embeddings_mps(parquet_file, state=None) -> Tuple[Optional[Path], O
     documents = df["clean_text"].tolist()
     all_embeddings = []
 
-    temp_output = output_file.with_suffix('.parquet.tmp')
+    temp_output = output_file.with_suffix(".parquet.tmp")
 
     for chunk_start in range(0, len(documents), chunk_size):
         chunk_end = min(chunk_start + chunk_size, len(documents))
         chunk_docs = documents[chunk_start:chunk_end]
 
-        print(f"\n📦 Processing chunk {chunk_start//chunk_size + 1}/{(len(documents)-1)//chunk_size + 1}")
+        print(
+            f"\n📦 Processing chunk {chunk_start // chunk_size + 1}/{(len(documents) - 1) // chunk_size + 1}"
+        )
 
         chunk_embeddings = []
         for batch_start in range(0, len(chunk_docs), encode_batch_size):
-            batch = chunk_docs[batch_start:batch_start+encode_batch_size]
-            print(f"  Encoding batch {batch_start//encode_batch_size + 1}/{(len(chunk_docs)-1)//encode_batch_size + 1}")
+            batch = chunk_docs[batch_start : batch_start + encode_batch_size]
+            print(
+                f"  Encoding batch {batch_start // encode_batch_size + 1}/{(len(chunk_docs) - 1) // encode_batch_size + 1}"
+            )
 
             embeddings = model.encode(
                 batch,
@@ -283,14 +290,16 @@ def upsert_to_db(embedded_parquet_file, df, state=None):
 
     try:
         for partition_name, partition_df in df.groupby("partition"):
-            print(f"\n  📋 Processing partition {partition_name} ({len(partition_df):,} rows)")
+            print(
+                f"\n  📋 Processing partition {partition_name} ({len(partition_df):,} rows)"
+            )
 
             # Get existing IDs from the database to avoid duplicates
             with conn.cursor() as cur:
                 partition_ids = partition_df["id"].astype(str).tolist()
                 cur.execute(
                     f"SELECT id FROM {partition_name} WHERE id = ANY(%s)",
-                    (partition_ids,)
+                    (partition_ids,),
                 )
                 existing_ids = set(row[0] for row in cur.fetchall())
                 print(f"  Found {len(existing_ids):,} existing IDs in {partition_name}")
@@ -320,7 +329,7 @@ def upsert_to_db(embedded_parquet_file, df, state=None):
 
             # Process in batches
             for batch_start in range(0, len(records), batch_size):
-                batch = records[batch_start:batch_start+batch_size]
+                batch = records[batch_start : batch_start + batch_size]
 
                 with conn.cursor() as cur:
                     cur.executemany(
@@ -338,7 +347,9 @@ def upsert_to_db(embedded_parquet_file, df, state=None):
                 processed_ids.update(batch_ids)
 
                 total_inserted += len(batch)
-                print(f"    Progress: {batch_start + len(batch)}/{len(records)} | Total: {total_inserted:,}")
+                print(
+                    f"    Progress: {batch_start + len(batch)}/{len(records)} | Total: {total_inserted:,}"
+                )
 
                 # Save state periodically
                 if state is not None:
@@ -358,12 +369,26 @@ def main():
     parser = argparse.ArgumentParser(
         description="Fetch, embed, and upsert HN comments (idempotent & resumable)"
     )
-    parser.add_argument("--resume", action="store_true", help="Resume from previous state")
-    parser.add_argument("--skip-fetch", action="store_true", help="Skip BigQuery fetch step")
-    parser.add_argument("--skip-embed", action="store_true", help="Skip embedding generation step")
-    parser.add_argument("--skip-upsert", action="store_true", help="Skip database upsert step")
-    parser.add_argument("--reset", action="store_true", help="Reset state and start fresh")
-    parser.add_argument("--project", type=str, help="GCP project ID for BigQuery billing (defaults to GOOGLE_CLOUD_PROJECT env var or gcloud default)")
+    parser.add_argument(
+        "--resume", action="store_true", help="Resume from previous state"
+    )
+    parser.add_argument(
+        "--skip-fetch", action="store_true", help="Skip BigQuery fetch step"
+    )
+    parser.add_argument(
+        "--skip-embed", action="store_true", help="Skip embedding generation step"
+    )
+    parser.add_argument(
+        "--skip-upsert", action="store_true", help="Skip database upsert step"
+    )
+    parser.add_argument(
+        "--reset", action="store_true", help="Reset state and start fresh"
+    )
+    parser.add_argument(
+        "--project",
+        type=str,
+        help="GCP project ID for BigQuery billing (defaults to GOOGLE_CLOUD_PROJECT env var or gcloud default)",
+    )
 
     args = parser.parse_args()
 

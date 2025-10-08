@@ -1,8 +1,15 @@
 import os
+import time
 
 import gradio as gr
 
+from hn_search.cache_config import redis_client
+from hn_search.job_manager import JobManager
+
 from .graph import create_rag_workflow
+
+# Initialize job manager
+job_manager = JobManager(redis_client)
 
 
 def hn_search_rag(query: str):
@@ -10,15 +17,63 @@ def hn_search_rag(query: str):
         yield "Please enter a question.", "", ""
         return
 
-    app = create_rag_workflow()
-    initial_state = {"query": query}
+    # Try to claim this job
+    claimed, job_id = job_manager.try_claim_job(query)
 
     progress_log = []
     current_sources = ""
     current_answer = ""
 
+    if not claimed:
+        # Another request is processing this query - poll for progress
+        progress_log.append(f"🔍 Searching for: {query}")
+        yield "\n".join(progress_log), "", ""
+
+        # Poll for progress updates from the processing job
+        timeout = 300  # 5 minutes
+        start_time = time.time()
+        last_progress = ""
+
+        while time.time() - start_time < timeout:
+            # Check progress
+            current_progress = job_manager.get_progress(job_id)
+            if current_progress and current_progress != last_progress:
+                # Mirror the progress from the processing job
+                last_progress = current_progress
+                yield current_progress, "", ""
+
+            # Check if complete
+            result = job_manager.get_result(job_id)
+            if result:
+                # Job completed - show final state
+                final_progress = f"🔍 Searching for: {query}\n📚 Retrieving relevant HN comments...\n🤖 Generating answer with DeepSeek...\n✅ Complete!"
+                yield (
+                    final_progress,
+                    result.get("answer", ""),
+                    result.get("sources", ""),
+                )
+                return
+
+            time.sleep(0.5)
+
+        # Timeout - try to claim and process ourselves
+        progress_log = [f"🔍 Searching for: {query}"]
+        progress_log.append(
+            "⚠️ Timeout waiting for other request, processing query now..."
+        )
+        yield "\n".join(progress_log), "", ""
+        claimed, job_id = job_manager.try_claim_job(query)
+        if not claimed:
+            yield "\n".join(progress_log) + "\n❌ Unable to process query", "", ""
+            return
+
+    # We claimed the job - process it
+    app = create_rag_workflow()
+    initial_state = {"query": query}
+
     try:
         progress_log.append(f"🔍 Searching for: {query}")
+        job_manager.update_progress(job_id, "\n".join(progress_log))
         yield "\n".join(progress_log), "", ""
 
         for event in app.stream(initial_state):
@@ -35,6 +90,7 @@ def hn_search_rag(query: str):
 
             if node_name in node_messages:
                 progress_log.append(node_messages[node_name])
+                job_manager.update_progress(job_id, "\n".join(progress_log))
                 yield "\n".join(progress_log), current_answer, current_sources
 
             if "search_results" in result_state and result_state["search_results"]:
@@ -54,17 +110,24 @@ def hn_search_rag(query: str):
             if "error_message" in result_state:
                 error_msg = f"❌ Error: {result_state['error_message']}"
                 progress_log.append(error_msg)
+                job_manager.store_error(job_id, result_state["error_message"])
                 yield "\n".join(progress_log), "", ""
                 return
+
+        # Store successful result for other waiting requests
+        job_manager.store_result(
+            job_id, {"answer": current_answer, "sources": current_sources}
+        )
+
+        progress_log.append("✅ Complete!")
+        yield "\n".join(progress_log), current_answer, current_sources
 
     except Exception as e:
         error_msg = f"❌ Error: {str(e)}"
         progress_log.append(error_msg)
+        job_manager.store_error(job_id, str(e))
         yield "\n".join(progress_log), current_answer, current_sources
         return
-
-    progress_log.append("✅ Complete!")
-    yield "\n".join(progress_log), current_answer, current_sources
 
 
 def create_interface():
