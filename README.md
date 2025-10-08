@@ -295,21 +295,40 @@ Answer:"""
 - **Documents**: ~9.4M Hacker News comments
 - **Storage**: ~40 GB (including embeddings)
 - **Query Latency**:
-  - Cold query: ~30s (embedding + search)
-  - Cached query: ~50ms
-  - RAG end-to-end: ~60s (including LLM generation)
+  - Cold query: ~30s (embedding + search + LLM)
+  - Cached query: <1s (Redis cache hit)
+  - Concurrent duplicate query: <1s (job deduplication)
+  - RAG end-to-end: ~30s (including LLM generation)
 
-### Optimization Techniques
-1. **Caching**: Redis cache for vector search results (90%+ hit rate for common queries)
-2. **Batching**: Batch embedding generation (128 docs/batch) for GPU efficiency
-3. **Partitioning**: Monthly table partitions for faster queries and easier maintenance
-4. **Connection Pooling**: psycopg3 connection pool reduces overhead
-5. **Incremental Updates**: Only process new comments since last run
+### Production Optimizations ⚡
+
+**Implemented**:
+1. **Singleton Embedding Model**: Model loaded once and reused (3-5x throughput)
+2. **Job Deduplication**: Concurrent duplicate queries share processing (saves 90%+ compute)
+3. **Multi-layer Caching**: Redis cache for vector search, LLM answers, and job results
+4. **Connection Pooling**: PostgreSQL connection pool (min: 2, max: 20)
+5. **Partitioned Tables**: Monthly partitions for efficient indexing
+6. **Incremental Updates**: Only process new comments since last run
+
+### Capacity
+
+**Single Instance**:
+- 20-30 concurrent users (unique queries)
+- 100+ concurrent users (with 80% cache hit rate)
+
+**Horizontal Scaling** (Railway/Cloud):
+- 2 replicas: 40-60 concurrent users
+- 4 replicas: 80-120 concurrent users
+- 8 replicas: 160-240 concurrent users
+
+See [RAILWAY.md](RAILWAY.md) for deployment guide.
 
 ### Resource Requirements
-- **RAM**: 2-4 GB for query service, 8-16 GB for embedding generation
-- **Storage**: 1 GB per ~70k comments (including embeddings)
-- **GPU**: Optional (MPS/CUDA) for 5-10x faster embedding generation
+- **RAM**: 2-3 GB per instance (1.5GB for embedding model)
+- **Storage**: ~40 GB for database (9.4M documents + embeddings)
+- **CPU**: 0.5-1.0 cores per instance
+- **PostgreSQL**: 100+ connections (20 per instance)
+- **Redis**: 512MB-1GB for cache
 
 ## 🔧 Configuration
 

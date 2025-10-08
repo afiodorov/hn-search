@@ -3,13 +3,12 @@ import sys
 import psycopg
 from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
-from sentence_transformers import SentenceTransformer
 
 from hn_search.cache_config import (
     cache_vector_search,
     get_cached_vector_search,
 )
-from hn_search.common import get_device
+from hn_search.common import get_model
 from hn_search.db_config import get_db_config
 
 load_dotenv()
@@ -39,11 +38,8 @@ def query(
             sys.stdout.flush()
         return
 
-    device = get_device()
-    print(f"Loading embedding model on {device}...", file=sys.stderr)
-    model = SentenceTransformer(
-        "sentence-transformers/all-mpnet-base-v2", device=device
-    )
+    print("Loading embedding model...", file=sys.stderr)
+    model = get_model()
 
     print("Encoding query...", file=sys.stderr)
     query_embedding = model.encode([query_text])[0]

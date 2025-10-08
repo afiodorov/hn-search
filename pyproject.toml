@@ -38,6 +38,10 @@ dev = [
     "html2text>=2025.4.15",
     "ruff",
 ]
+prod = [
+    "gunicorn>=21.0.0",
+    "uvicorn[standard]>=0.24.0",
+]
 
 [tool.ruff]
 line-length = 88

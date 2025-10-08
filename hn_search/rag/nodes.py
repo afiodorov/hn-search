@@ -13,7 +13,7 @@ from hn_search.cache_config import (
     get_cached_answer,
     get_cached_vector_search,
 )
-from hn_search.common import get_device
+from hn_search.common import get_device, get_model
 from hn_search.db_config import get_db_config
 
 from .state import RAGState, SearchResult
@@ -32,8 +32,8 @@ def get_connection_pool():
         conn_string = f"host={db_config['host']} port={db_config['port']} dbname={db_config['dbname']} user={db_config['user']} password={db_config['password']}"
         _connection_pool = ConnectionPool(
             conn_string,
-            min_size=1,
-            max_size=10,
+            min_size=2,
+            max_size=20,
             max_idle=300,  # Close connections idle for 5 minutes
             max_lifetime=3600,  # Replace connections after 1 hour
             kwargs={
@@ -88,13 +88,10 @@ def retrieve_node(state: RAGState) -> RAGState:
                 "context": context,
             }
 
-        device = get_device()
-        model = SentenceTransformer(
-            "sentence-transformers/all-mpnet-base-v2", device=device
-        )
-
         print(f"🔍 Searching for: {query}")
 
+        # Use singleton embedding model
+        model = get_model()
         query_embedding = model.encode([query])[0]
 
         # Get connection from pool
