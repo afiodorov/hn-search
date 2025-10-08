@@ -1,4 +1,6 @@
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import psycopg
 from dotenv import load_dotenv
@@ -26,6 +28,11 @@ logger = get_logger(__name__)
 # Initialize connection pool (singleton)
 _connection_pool = None
 
+# Cache partition names (refreshed periodically)
+_partition_cache = None
+_partition_cache_timestamp = 0
+_PARTITION_CACHE_TTL = 3600  # 1 hour
+
 
 def get_connection_pool():
     global _connection_pool
@@ -52,6 +59,108 @@ def get_connection_pool():
             check=ConnectionPool.check_connection,  # Check connection health before use
         )
     return _connection_pool
+
+
+def _query_partition(pool, partition_name: str, query_embedding, n_results: int):
+    """Query a single partition for nearest neighbors."""
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, clean_text, author, timestamp, type,
+                           embedding <=> %s::vector AS distance
+                    FROM {partition_name}
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (query_embedding.tolist(), query_embedding.tolist(), n_results),
+                )
+                return cur.fetchall()
+    except Exception as e:
+        logger.warning(f"Error querying partition {partition_name}: {e}")
+        return []
+
+
+def _get_partitions(pool):
+    """
+    Get list of all partition table names.
+
+    Cached for 1 hour since partitions rarely change (only monthly).
+    """
+    global _partition_cache, _partition_cache_timestamp
+
+    current_time = time.time()
+
+    # Return cached value if still fresh
+    if (
+        _partition_cache
+        and (current_time - _partition_cache_timestamp) < _PARTITION_CACHE_TTL
+    ):
+        logger.debug(
+            f"Using cached partition list ({len(_partition_cache)} partitions)"
+        )
+        return _partition_cache
+
+    # Fetch fresh partition list
+    logger.info("Fetching partition list from database")
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT tablename
+                FROM pg_tables
+                WHERE schemaname = 'public'
+                  AND tablename LIKE 'hn_documents_%'
+                ORDER BY tablename
+            """)
+            partitions = [row[0] for row in cur.fetchall()]
+
+    # Update cache
+    _partition_cache = partitions
+    _partition_cache_timestamp = current_time
+    logger.info(f"Cached {len(partitions)} partitions")
+
+    return partitions
+
+
+def _parallel_partition_search(pool, query_embedding, n_results: int):
+    """
+    Query all partitions in parallel and return combined results.
+
+    Uses ThreadPoolExecutor to query multiple partitions concurrently,
+    then merges results. Much faster than sequential partition scanning.
+    """
+    partitions = _get_partitions(pool)
+    logger.info(f"Querying {len(partitions)} partitions in parallel")
+
+    all_results = []
+
+    # Use max_workers based on connection pool size (leave some headroom)
+    max_workers = min(15, len(partitions))  # Use up to 15 connections
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all partition queries
+        future_to_partition = {
+            executor.submit(
+                _query_partition, pool, partition, query_embedding, n_results
+            ): partition
+            for partition in partitions
+        }
+
+        # Collect results as they complete
+        for future in as_completed(future_to_partition):
+            partition = future_to_partition[future]
+            try:
+                results = future.result()
+                all_results.extend(results)
+                logger.debug(f"Partition {partition}: {len(results)} results")
+            except Exception as e:
+                logger.exception(f"Exception querying partition {partition}: {e}")
+
+    logger.info(
+        f"Retrieved {len(all_results)} total results from {len(partitions)} partitions"
+    )
+    return all_results
 
 
 def retrieve_node(state: RAGState) -> RAGState:
@@ -104,55 +213,51 @@ def retrieve_node(state: RAGState) -> RAGState:
 
         # Get connection from pool
         pool = get_connection_pool()
-        with log_time(logger, "vector search in PostgreSQL"):
-            with pool.connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT id, clean_text, author, timestamp, type,
-                               embedding <=> %s::vector AS distance
-                        FROM hn_documents
-                        ORDER BY embedding <=> %s::vector
-                        LIMIT %s
-                        """,
-                        (query_embedding.tolist(), query_embedding.tolist(), n_results),
+
+        # Query partitions in parallel
+        with log_time(logger, "parallel vector search across partitions"):
+            all_results = _parallel_partition_search(pool, query_embedding, n_results)
+
+        # Merge and sort results from all partitions
+        with log_time(logger, "merging partition results"):
+            # Sort by distance and take top n_results
+            all_results.sort(key=lambda x: x[5])  # Sort by distance (index 5)
+            results = all_results[:n_results]
+
+            search_results = []
+            cache_data = []
+
+            for (
+                doc_id,
+                document,
+                author,
+                timestamp,
+                doc_type,
+                distance,
+            ) in results:
+                search_results.append(
+                    SearchResult(
+                        id=doc_id,
+                        author=author,
+                        type=doc_type,
+                        text=document,
+                        timestamp=timestamp,
+                        distance=distance,
                     )
-
-                    results = cur.fetchall()
-                    search_results = []
-                    cache_data = []
-
-                    for (
-                        doc_id,
-                        document,
-                        author,
-                        timestamp,
-                        doc_type,
-                        distance,
-                    ) in results:
-                        search_results.append(
-                            SearchResult(
-                                id=doc_id,
-                                author=author,
-                                type=doc_type,
-                                text=document,
-                                timestamp=timestamp,
-                                distance=distance,
-                            )
-                        )
-                        # Prepare for caching
-                        cache_data.append(
-                            {
-                                "id": doc_id,
-                                "text": document,
-                                "author": author,
-                                "timestamp": timestamp.isoformat()
-                                if hasattr(timestamp, "isoformat")
-                                else str(timestamp),
-                                "type": doc_type,
-                                "distance": float(distance),
-                            }
-                        )
+                )
+                # Prepare for caching
+                cache_data.append(
+                    {
+                        "id": doc_id,
+                        "text": document,
+                        "author": author,
+                        "timestamp": timestamp.isoformat()
+                        if hasattr(timestamp, "isoformat")
+                        else str(timestamp),
+                        "type": doc_type,
+                        "distance": float(distance),
+                    }
+                )
 
         # Cache the results
         if cache_data:
