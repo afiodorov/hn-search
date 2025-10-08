@@ -212,3 +212,67 @@ class JobManager:
             return json.loads(result) if result else None
         except Exception:
             return None
+
+    def track_recent_query(self, query: str):
+        """Track query in recent queries sorted set."""
+        if not self.redis:
+            logger.warning("⚠️ Redis not available, cannot track recent query")
+            return
+
+        try:
+            # Use sorted set with timestamp as score
+            timestamp = time.time()
+            self.redis.zadd("recent_queries", {query: timestamp})
+
+            # Keep only last 100 queries (trim older ones)
+            self.redis.zremrangebyrank("recent_queries", 0, -101)
+
+            logger.debug(f"✅ Tracked recent query: {query[:50]}...")
+
+        except Exception as e:
+            logger.exception(f"⚠️ Error tracking recent query: {e}")
+
+    def get_recent_queries(self, limit: int = 10) -> list:
+        """Get most recent queries with timestamps."""
+        if not self.redis:
+            return []
+
+        try:
+            # Get top queries in reverse order (most recent first)
+            queries = self.redis.zrevrange(
+                "recent_queries", 0, limit - 1, withscores=True
+            )
+
+            # Format results with human-readable timestamps
+            from datetime import datetime
+
+            result = []
+            for query_bytes, timestamp in queries:
+                query = query_bytes.decode("utf-8")
+                dt = datetime.fromtimestamp(timestamp)
+                time_ago = self._format_time_ago(timestamp)
+                result.append(
+                    {"query": query, "timestamp": dt.isoformat(), "time_ago": time_ago}
+                )
+
+            return result
+
+        except Exception as e:
+            logger.exception(f"⚠️ Error getting recent queries: {e}")
+            return []
+
+    def _format_time_ago(self, timestamp: float) -> str:
+        """Format timestamp as human-readable 'time ago' string."""
+        seconds_ago = time.time() - timestamp
+
+        if seconds_ago < 60:
+            return "just now"
+        elif seconds_ago < 3600:
+            minutes = int(seconds_ago / 60)
+            return f"{minutes}m ago"
+        elif seconds_ago < 86400:
+            hours = int(seconds_ago / 3600)
+            return f"{hours}h ago"
+        else:
+            days = int(seconds_ago / 86400)
+            return f"{days}d ago"

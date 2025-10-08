@@ -17,20 +17,25 @@ logger = get_logger(__name__)
 
 def hn_search_rag(query: str):
     if not query.strip():
-        yield "Please enter a question.", "", ""
+        yield "Please enter a question.", "", "", ""
         return
 
     # Try to claim this job
     claimed, job_id = job_manager.try_claim_job(query)
 
+    # Track query immediately so it shows up in recent queries
+    job_manager.track_recent_query(query)
+
     progress_log = []
     current_sources = ""
     current_answer = ""
+    current_recent = _format_recent_queries()
+    logger.debug(f"Recent queries at start: {current_recent[:100]}...")
 
     if not claimed:
         # Another request is processing this query - poll for progress
         progress_log.append(f"🔍 Searching for: {query}")
-        yield "\n".join(progress_log), "", ""
+        yield "\n".join(progress_log), "", "", current_recent
 
         # Poll for progress updates from the processing job
         timeout = job_manager.max_poll_time
@@ -43,17 +48,20 @@ def hn_search_rag(query: str):
             if current_progress and current_progress != last_progress:
                 # Mirror the progress from the processing job
                 last_progress = current_progress
-                yield current_progress, "", ""
+                yield current_progress, "", "", current_recent
 
             # Check if complete
             result = job_manager.get_result(job_id)
             if result:
                 # Job completed - show final state
                 final_progress = f"🔍 Searching for: {query}\n📚 Retrieving relevant HN comments...\n🤖 Generating answer with DeepSeek...\n✅ Complete!"
+                # Refresh recent queries after completion
+                current_recent = _format_recent_queries()
                 yield (
                     final_progress,
                     result.get("answer", ""),
                     result.get("sources", ""),
+                    current_recent,
                 )
                 return
 
@@ -64,10 +72,15 @@ def hn_search_rag(query: str):
         progress_log.append(
             "⚠️ Timeout waiting for other request, processing query now..."
         )
-        yield "\n".join(progress_log), "", ""
+        yield "\n".join(progress_log), "", "", current_recent
         claimed, job_id = job_manager.try_claim_job(query)
         if not claimed:
-            yield "\n".join(progress_log) + "\n❌ Unable to process query", "", ""
+            yield (
+                "\n".join(progress_log) + "\n❌ Unable to process query",
+                "",
+                "",
+                current_recent,
+            )
             return
 
     # We claimed the job - process it
@@ -77,7 +90,7 @@ def hn_search_rag(query: str):
     try:
         progress_log.append(f"🔍 Searching for: {query}")
         job_manager.update_progress(job_id, "\n".join(progress_log))
-        yield "\n".join(progress_log), "", ""
+        yield "\n".join(progress_log), "", "", current_recent
 
         for event in app.stream(initial_state):
             node_name = list(event.keys())[0]
@@ -94,7 +107,12 @@ def hn_search_rag(query: str):
             if node_name in node_messages:
                 progress_log.append(node_messages[node_name])
                 job_manager.update_progress(job_id, "\n".join(progress_log))
-                yield "\n".join(progress_log), current_answer, current_sources
+                yield (
+                    "\n".join(progress_log),
+                    current_answer,
+                    current_sources,
+                    current_recent,
+                )
 
             if "search_results" in result_state and result_state["search_results"]:
                 sources = []
@@ -104,17 +122,27 @@ def hn_search_rag(query: str):
                         f"**[{i}]** [{r['author']}]({hn_link}) ({r['timestamp']})\n\n{r['text'][:200]}..."
                     )
                 current_sources = "\n\n---\n\n".join(sources)
-                yield "\n".join(progress_log), current_answer, current_sources
+                yield (
+                    "\n".join(progress_log),
+                    current_answer,
+                    current_sources,
+                    current_recent,
+                )
 
             if "answer" in result_state:
                 current_answer = result_state["answer"]
-                yield "\n".join(progress_log), current_answer, current_sources
+                yield (
+                    "\n".join(progress_log),
+                    current_answer,
+                    current_sources,
+                    current_recent,
+                )
 
             if "error_message" in result_state:
                 error_msg = f"❌ Error: {result_state['error_message']}"
                 progress_log.append(error_msg)
                 job_manager.store_error(job_id, result_state["error_message"])
-                yield "\n".join(progress_log), "", ""
+                yield "\n".join(progress_log), "", "", current_recent
                 return
 
         # Store successful result for other waiting requests
@@ -122,15 +150,38 @@ def hn_search_rag(query: str):
             job_id, {"answer": current_answer, "sources": current_sources}
         )
 
+        # Refresh recent queries after storing result
+        current_recent = _format_recent_queries()
+
         progress_log.append("✅ Complete!")
-        yield "\n".join(progress_log), current_answer, current_sources
+        yield "\n".join(progress_log), current_answer, current_sources, current_recent
 
     except Exception as e:
         error_msg = f"❌ Error: {str(e)}"
         progress_log.append(error_msg)
         job_manager.store_error(job_id, str(e))
-        yield "\n".join(progress_log), current_answer, current_sources
+        yield "\n".join(progress_log), current_answer, current_sources, current_recent
         return
+
+
+def _format_recent_queries() -> str:
+    """Format recent queries as markdown."""
+    recent = job_manager.get_recent_queries(limit=10)
+
+    if not recent:
+        return "*No recent queries yet*"
+
+    lines = []
+    for item in recent:
+        query = item["query"]
+        time_ago = item["time_ago"]
+        # Make queries clickable (URL-encoded)
+        import urllib.parse
+
+        encoded_query = urllib.parse.quote(query)
+        lines.append(f"- **{time_ago}**: [{query}](?q={encoded_query})")
+
+    return "\n".join(lines)
 
 
 def create_interface():
@@ -183,6 +234,13 @@ def create_interface():
         with gr.Accordion("📚 Source Comments", open=False):
             sources_output = gr.Markdown(value="")
 
+        with gr.Accordion("🕒 Recent Queries", open=False):
+            recent_output = gr.Markdown(value="*No recent queries yet*")
+
+        # Auto-refresh recent queries every 5 seconds
+        timer = gr.Timer(value=5, active=True)
+        timer.tick(fn=_format_recent_queries, inputs=[], outputs=[recent_output])
+
         # Hidden HTML component for JavaScript execution
         html_output = gr.HTML(visible=False)
 
@@ -196,7 +254,13 @@ def create_interface():
         search_button.click(
             fn=search_and_update_url,
             inputs=[query_input],
-            outputs=[progress_output, answer_output, sources_output, html_output],
+            outputs=[
+                progress_output,
+                answer_output,
+                sources_output,
+                recent_output,
+                html_output,
+            ],
             show_progress="full",
         )
 
@@ -211,23 +275,25 @@ def create_interface():
         # Handle URL parameters and auto-search on load
         def load_and_search_from_url(request: gr.Request):
             """Load query parameters from URL and auto-search if present."""
+            recent_queries = _format_recent_queries()
+
             if request:
                 query = request.query_params.get("q", "")
                 logger.info(f"📎 Loading from URL: q='{query}'")
 
                 if query:
                     logger.info(f"🔍 Auto-searching for: {query}")
-                    # Start the search immediately and return results
-                    results = list(hn_search_rag(query))
-                    if results:
-                        # Get the final result
-                        progress, answer, sources = results[-1]
-                        return query, progress, answer, sources, ""
-                    else:
-                        return query, "Search completed", "", "", ""
+                    # Yield initial state with query and recent queries immediately
+                    yield query, "Ready to search...", "", "", recent_queries, ""
+
+                    # Then stream search results
+                    for progress, answer, sources, recent in hn_search_rag(query):
+                        yield query, progress, answer, sources, recent, ""
+                    return
                 else:
-                    return "", "Ready to search...", "", "", ""
-            return "", "Ready to search...", "", "", ""
+                    yield "", "Ready to search...", "", "", recent_queries, ""
+                    return
+            yield "", "Ready to search...", "", "", recent_queries, ""
 
         # Set up load handler to populate fields and auto-search from URL
         demo.load(
@@ -238,6 +304,7 @@ def create_interface():
                 progress_output,
                 answer_output,
                 sources_output,
+                recent_output,
                 html_output,
             ],
         )
