@@ -125,7 +125,25 @@ def fetch_from_bigquery(
     # Initialize client - uses Application Default Credentials by default
     # Specify project to control billing
     project = project or os.getenv("GOOGLE_CLOUD_PROJECT")
-    client = bigquery.Client(project=project)
+
+    # Check for credentials JSON in environment (for Railway/cloud deployments)
+    creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if creds_json:
+        import tempfile
+        from google.oauth2 import service_account
+
+        # Write credentials to a temp file
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
+            f.write(creds_json)
+            creds_file = f.name
+
+        credentials = service_account.Credentials.from_service_account_file(creds_file)
+        client = bigquery.Client(project=project, credentials=credentials)
+
+        # Clean up temp file
+        os.unlink(creds_file)
+    else:
+        client = bigquery.Client(project=project)
 
     print(f"💰 Using GCP project: {client.project}")
     print(f"   Account: Run 'gcloud auth list' to see active account")
