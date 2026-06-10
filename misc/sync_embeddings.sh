@@ -1,38 +1,45 @@
 #!/bin/bash
+# Poll a remote GPU box (e.g. vast.ai) and rsync finished embedded month files back
+# as they complete, so you can pull results while the rest keep computing.
+#
+# Configure via env vars (vast.ai gives you a fresh host/port each rental):
+#   REMOTE_HOST=root@1.2.3.4 REMOTE_PORT=22 REMOTE_DIR=/root/hn-search/data/embedded \
+#     ./misc/sync_embeddings.sh
+#
+# Files are considered "done" when their size is stable across a 2s check, then
+# rsynced into ./data/embedded (use --remove-source-files only if you're sure).
 
-REMOTE_HOST="root@86.127.249.120"
-REMOTE_PORT="21604"
-REMOTE_DIR="/hn/embeddings"
-LOCAL_DIR="/Users/artiomfiodorov/code/hn-search/embeddings"
+set -euo pipefail
+
+REMOTE_HOST="${REMOTE_HOST:?set REMOTE_HOST, e.g. root@1.2.3.4}"
+REMOTE_PORT="${REMOTE_PORT:-22}"
+REMOTE_DIR="${REMOTE_DIR:-/root/hn-search/data/embedded}"
+LOCAL_DIR="${LOCAL_DIR:-$(cd "$(dirname "$0")/.." && pwd)/data/embedded}"
 
 mkdir -p "$LOCAL_DIR"
+echo "Syncing $REMOTE_HOST:$REMOTE_DIR -> $LOCAL_DIR (Ctrl-C to stop)"
 
 while true; do
-    echo "$(date): Checking for completed files..."
-
+    echo "$(date): checking for completed files..."
     completed_files=$(ssh -p "$REMOTE_PORT" "$REMOTE_HOST" '
         cd '"$REMOTE_DIR"' 2>/dev/null || exit 0
-        for f in *.parquet; do
+        for f in month_*.parquet; do
             [ -f "$f" ] || continue
-            size1=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
+            s1=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
             sleep 2
-            size2=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
-            if [ "$size1" = "$size2" ]; then
-                echo "$f"
-            fi
+            s2=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
+            [ "$s1" = "$s2" ] && echo "$f"
         done
     ')
 
     if [ -n "$completed_files" ]; then
-        echo "$(date): Found completed files, syncing..."
         for file in $completed_files; do
-            rsync -avz --remove-source-files -e "ssh -p $REMOTE_PORT" \
+            rsync -avz -e "ssh -p $REMOTE_PORT" \
                 "$REMOTE_HOST:$REMOTE_DIR/$file" "$LOCAL_DIR/"
-            echo "$(date): Synced $file"
+            echo "$(date): synced $file"
         done
     else
-        echo "$(date): No completed files to sync"
+        echo "$(date): nothing new"
     fi
-
     sleep 60
 done

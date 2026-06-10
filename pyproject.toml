@@ -3,14 +3,17 @@ name = "hn-search"
 version = "0.1.0"
 description = "Hacker News search using vector embeddings"
 requires-python = ">=3.13"
+# Serve path: query embedding runs via ONNX Runtime (no torch). Corpus embedding
+# (torch + sentence-transformers) lives in the `dev` extra — see misc/.
 dependencies = [
-    "sentence-transformers",
-    "torch>=2.0.0",
-    "torchvision>=0.15.0",
-    "torchaudio>=2.0.0",
+    "onnxruntime>=1.17",
+    "huggingface-hub>=0.20",
+    "tokenizers>=0.15",
+    "numpy",
     "langgraph",
     "langchain",
     "langchain-openai",
+    "langchain-community>=0.3.30",
     "python-dotenv",
     "gradio",
     "pyarrow",
@@ -18,21 +21,17 @@ dependencies = [
     "psycopg[binary,pool]>=3.0",
     "pgvector",
     "redis>=6.4.0",
-    "langchain-community>=0.3.30",
 ]
 
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu", marker = "sys_platform == 'linux'" }
-torchvision = { index = "pytorch-cpu", marker = "sys_platform == 'linux'" }
-torchaudio = { index = "pytorch-cpu", marker = "sys_platform == 'linux'" }
+# NOTE: torch is intentionally unpinned to any index. It is dev-only (serve uses
+# ONNX, no torch), so it resolves from PyPI — which gives CUDA-enabled torch on the
+# Linux GPU box used for batch embedding, and the right build on macOS for dev.
 
 [project.optional-dependencies]
+# Batch embedding generation + data pipeline + tooling. Run with `uv run --extra dev`.
 dev = [
+    "torch>=2.0.0",
+    "sentence-transformers",
     "db-dtypes>=1.4.3",
     "google-cloud-bigquery>=3.38.0",
     "google-cloud-bigquery-storage>=2.0.0",

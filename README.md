@@ -13,7 +13,8 @@ Hosted at [hn.fiodorov.es](https://hn.fiodorov.es)
 **Key Features:**
 - 🔍 **Semantic Search**: Natural language queries with cosine similarity ranking
 - 🤖 **RAG System**: AI-powered Q&A using LangGraph workflows and DeepSeek LLM
-- 📊 **Scalable Architecture**: PostgreSQL with pgvector for production-grade vector search
+- 🪶 **RAM-light vector search**: binary-quantized HNSW + exact rerank — ~10× smaller hot index than float, no measurable quality loss
+- ⚡ **ONNX query encoder**: serve without torch (~300 MB instead of ~1.5 GB RAM)
 - ⚡ **Redis Caching**: Sub-second response times for repeated queries
 - 🔄 **Incremental Updates**: Idempotent data pipeline for fetching new HN comments
 - 🎨 **Web Interface**: Gradio-based UI with URL parameter support
@@ -39,11 +40,11 @@ Hosted at [hn.fiodorov.es](https://hn.fiodorov.es)
 ├─────────────────────────────────────────────────────────────────┤
 │  User Query                                                      │
 │         ↓                                                        │
-│  Encode with sentence-transformers/all-mpnet-base-v2            │
+│  Encode with all-mpnet-base-v2 via ONNX Runtime (CPU, no torch) │
 │         ↓                                                        │
 │  Redis Cache Check ────────────────┐                            │
 │         ↓                           │ (cache hit)                │
-│  PostgreSQL Vector Search (cosine) │                            │
+│  Binary-quant Hamming shortlist → exact cosine rerank          │
 │         ↓                           │                            │
 │  Cache Results ─────────────────────┘                            │
 │         ↓                                                        │
@@ -68,8 +69,8 @@ Hosted at [hn.fiodorov.es](https://hn.fiodorov.es)
 ### Core Technologies
 - **Language**: Python 3.13
 - **Package Manager**: [uv](https://github.com/astral-sh/uv) (fast Python package installer)
-- **Database**: PostgreSQL 16 + [pgvector](https://github.com/pgvector/pgvector) extension
-- **Vector Model**: [all-mpnet-base-v2](https://huggingface.co/sentence-transformers/all-mpnet-base-v2) (768-dim embeddings)
+- **Database**: PostgreSQL 16 + [pgvector](https://github.com/pgvector/pgvector) extension (`halfvec` + binary quantization)
+- **Vector Model**: [all-mpnet-base-v2](https://huggingface.co/sentence-transformers/all-mpnet-base-v2) (768-dim) — torch for batch embedding, **ONNX Runtime** at serve time
 - **LLM**: DeepSeek via OpenAI-compatible API
 - **Cache**: Redis 6.x
 - **Data Source**: [BigQuery HN Public Dataset](https://console.cloud.google.com/marketplace/product/y-combinator/hacker-news)
@@ -145,12 +146,43 @@ cp .env.example .env
 ### Database Setup
 
 ```bash
-# Initialize database with precomputed embeddings
+# Initialize database with precomputed embeddings (creates the binary index)
 uv run python -m hn_search.init_db_pgvector
 
 # Or initialize with test mode (100 docs only)
 uv run python -m hn_search.init_db_pgvector --test
+
+# (Re)build the binary HNSW index on all hn_documents* tables — also migrates any
+# vector(768) columns to halfvec(768). Idempotent; connects via DATABASE_URL.
+uv run python misc/build_binary_index.py
+# add --concurrent to avoid write locks on a live database
 ```
+
+### Full Rebuild From Scratch
+
+Bringing the corpus up from nothing (fresh BigQuery pull → GPU embeddings →
+partitions). Each step is **resumable** and **month-aligned**: one
+`month_YYYY_MM.parquet` per month maps to one `hn_documents_YYYY_MM` partition.
+
+**Prerequisites**: a Postgres+pgvector database with `DATABASE_URL` set in `.env`,
+and GCP credentials for BigQuery (`GOOGLE_CLOUD_PROJECT` / `GOOGLE_APPLICATION_CREDENTIALS_JSON`).
+
+```bash
+# 1. Fetch comments from BigQuery, one parquet per month (cheap, runs anywhere).
+#    Defaults to 2023-01 .. current month; override with --start/--end YYYY-MM.
+make fetch                 # → data/raw/month_*.parquet
+
+# 2. Embed on a GPU box (rent one, e.g. vast.ai). Copy data/raw up, then:
+make embed                 # → data/embedded/month_*.parquet  (resumable per month)
+#    Sync finished files back as they complete:
+#      rsync -avz -e "ssh -p PORT" user@host:/path/data/embedded/ data/embedded/
+
+# 3. Load embedded months into partitions (halfvec + binary HNSW index per month).
+make load                  # populates hn_documents_YYYY_MM, builds binary indexes
+```
+
+`misc/fetch_and_embed_new_comments.py` then keeps it current with incremental
+monthly pulls. The GPU is only needed for step 2; serving uses ONNX (no torch).
 
 ## 💡 Usage
 
@@ -219,8 +251,8 @@ A single 5090 Nvidia was rented from vast.ai to compute all historical
 embeddings for a few dollars.
 
 ```bash
-# Process raw parquet files and generate embeddings
-uv run python misc/generate_embeddings_gpu.py
+# Process raw parquet files and generate embeddings (torch lives in the dev extra)
+uv run --extra dev python misc/generate_embeddings_gpu.py
 
 # Uses MPS (Apple Silicon) or CUDA automatically
 # Processes in batches to avoid OOM
@@ -231,21 +263,40 @@ uv run python misc/generate_embeddings_gpu.py
 
 ### Vector Search
 
-The system uses cosine distance for similarity search:
+The system uses **binary-quantized HNSW with exact reranking** — a two-stage search
+that keeps the hot index ~10× smaller than a plain float index:
 
 ```sql
-SELECT id, clean_text, author, timestamp, type,
-       embedding <=> query_vector AS distance
-FROM hn_documents
-ORDER BY embedding <=> query_vector
-LIMIT 10
+-- Stage 1: shortlist by Hamming distance on the binary index (RAM-resident).
+-- Stage 2: rerank the shortlist by exact cosine distance.
+SELECT id, clean_text, author, timestamp, type, distance
+FROM (
+    SELECT id, clean_text, author, timestamp, type,
+           embedding <=> :query AS distance
+    FROM hn_documents
+    ORDER BY binary_quantize(embedding)::bit(768)
+             <~> binary_quantize(:query)::bit(768)
+    LIMIT 200
+) shortlist
+ORDER BY distance
+LIMIT 10;
 ```
 
+`binary_quantize` keeps one bit per dimension (the sign), so the searchable index
+stores 96 bytes/vector instead of 3072. Hamming search narrows millions of rows to
+a 200-row shortlist using the tiny index; exact cosine then reranks just those. On
+this corpus that recovers full result quality — strict recall@10 ≈ 0.90, and
+**tie-tolerant recall@10 = 0.999** (the "misses" are alternative neighbors at
+identical cosine distance, e.g. duplicate comments).
+
 **Performance Optimizations**:
-- HNSW index for approximate nearest neighbor search
+- Binary-quantized HNSW index (`bit_hamming_ops`) + exact rerank — ~3.7 GB hot
+  index at 9.4M rows vs ~37 GB for a float HNSW index
+- `halfvec(768)` storage — half the on-disk vector size, no quality loss
+- ONNX Runtime query encoder — ~300 MB RAM vs ~1.5 GB for torch, no torch at serve
 - Redis caching layer reduces repeated queries to <100ms
 - Connection pooling with psycopg3
-- Partitioned tables for efficient index scans
+- Partitioned tables queried in parallel, results merged by exact distance
 
 ### RAG Pipeline
 
@@ -289,11 +340,20 @@ Answer:"""
 - Good generalization to HN comment domain
 - Efficient inference on CPU/MPS/CUDA
 
+**Serving the model cheaply**: the corpus is embedded offline (torch, on a rented
+GPU), but at serve time only the user's *query* is embedded. That runs through
+[ONNX Runtime](https://onnxruntime.ai/) using the pre-exported ONNX weights shipped
+in the model's HF repo — verified bit-exact (cosine 1.0) against both
+sentence-transformers and the stored corpus embeddings, so no torch is needed in the
+serving image. On ARM hosts set `HN_ONNX_MODEL_FILE=onnx/model_qint8_arm64.onnx`.
+
 ## 📈 Performance & Scale
 
 ### Current Scale
 - **Documents**: ~9.4M Hacker News comments
-- **Storage**: ~40 GB (including embeddings)
+- **Storage**: ~25 GB (`halfvec` embeddings + text + binary index)
+- **Hot index**: ~3.7 GB binary HNSW (vs ~37 GB float) — the RAM-cost win
+- **Vector search**: ~2-3 ms/query (Hamming shortlist + exact rerank)
 - **Query Latency**:
   - Cold query: ~30s (embedding + search + LLM)
   - Cached query: <1s (Redis cache hit)
@@ -324,8 +384,11 @@ Answer:"""
 See [RAILWAY.md](RAILWAY.md) for deployment guide.
 
 ### Resource Requirements
-- **RAM**: 2-3 GB per instance (1.5GB for embedding model)
-- **Storage**: ~40 GB for database (9.4M documents + embeddings)
+- **App RAM**: ~0.3-0.5 GB per instance (ONNX query encoder; no torch)
+- **PostgreSQL RAM**: hot working set ≈ the binary index (~3.7 GB at 9.4M),
+  vs ~37 GB for a float HNSW index — fits a small instance. This is the main
+  cost win: it cuts the Railway bill from ~$50-100/mo to a small-instance tier.
+- **Storage**: ~25 GB for database (`halfvec` vectors + text + binary index)
 - **CPU**: 0.5-1.0 cores per instance
 - **PostgreSQL**: 100+ connections (20 per instance)
 - **Redis**: 512MB-1GB for cache

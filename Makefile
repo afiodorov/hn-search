@@ -1,4 +1,4 @@
-.PHONY: format lint clean
+.PHONY: format lint clean fetch embed load index rebuild
 
 # Default target - run both formatting and linting
 format:
@@ -20,3 +20,23 @@ lint:
 # Clean ChromaDB container and volumes
 clean:
 	docker compose down -v
+
+# ---- Full rebuild pipeline (see README "Full Rebuild From Scratch") ----
+# 1. Fetch HN comments from BigQuery, one parquet per month (runs anywhere).
+fetch:
+	uv run --extra dev python misc/fetch_historical.py
+
+# 2. Embed the monthly shards on a GPU box (the vast.ai step).
+embed:
+	uv run --extra dev python misc/generate_embeddings_gpu.py
+
+# 3. Load embedded months into hn_documents_YYYY_MM partitions (+ binary index).
+load:
+	uv run python misc/load_embedded_to_partitions.py
+
+# (Re)build / upgrade the binary HNSW index on all partitions.
+index:
+	uv run python misc/build_binary_index.py
+
+# Embed + load (run after `make fetch`); embed needs a GPU.
+rebuild: embed load

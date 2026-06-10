@@ -2,12 +2,10 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import psycopg
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from pgvector.psycopg import register_vector
 from psycopg_pool import ConnectionPool
-from sentence_transformers import SentenceTransformer
 
 from hn_search.cache_config import (
     cache_answer,
@@ -15,7 +13,7 @@ from hn_search.cache_config import (
     get_cached_answer,
     get_cached_vector_search,
 )
-from hn_search.common import get_device, get_model
+from hn_search.common import get_model
 from hn_search.db_config import get_db_config
 from hn_search.logging_config import get_logger, log_time
 
@@ -24,6 +22,18 @@ from .state import RAGState, SearchResult
 load_dotenv()
 
 logger = get_logger(__name__)
+
+# Vector search config (binary-quantized HNSW + exact rerank).
+# Embeddings are stored as halfvec(768); a bit_hamming_ops HNSW index over
+# binary_quantize(embedding) gives a ~10x smaller, RAM-resident index. We shortlist
+# by Hamming distance then rerank the shortlist by exact cosine — recall@10 matches
+# exact search for this data (ties aside) at a fraction of the RAM. See README.
+EMBEDDING_DIM = 768
+# How many Hamming candidates to rerank per partition. Larger = marginally better
+# recall, slightly slower. 200 is well past the recall plateau for this corpus.
+SHORTLIST_SIZE = int(os.getenv("HN_SHORTLIST_SIZE", "200"))
+# HNSW search breadth; must be >= the shortlist LIMIT to return that many candidates.
+EF_SEARCH = max(SHORTLIST_SIZE, int(os.getenv("HN_EF_SEARCH", "200")))
 
 # Initialize connection pool (singleton)
 _connection_pool = None
@@ -62,19 +72,35 @@ def get_connection_pool():
 
 
 def _query_partition(pool, partition_name: str, query_embedding, n_results: int):
-    """Query a single partition for nearest neighbors."""
+    """Query one partition: Hamming shortlist on the binary index, then exact rerank.
+
+    The inner query uses the binary HNSW index (cheap, RAM-resident) to pull the
+    SHORTLIST_SIZE nearest candidates by Hamming distance; the outer query reranks
+    just those by exact cosine and keeps the top n_results. Returned distances are
+    exact cosine, so they remain comparable when merged across partitions.
+    """
+    dim = EMBEDDING_DIM
     try:
         with pool.connection() as conn:
             with conn.cursor() as cur:
+                # SET LOCAL keeps this scoped to the current transaction. SET does
+                # not accept bind parameters, so inline the (int) value safely.
+                cur.execute(f"SET LOCAL hnsw.ef_search = {EF_SEARCH}")
                 cur.execute(
                     f"""
-                    SELECT id, clean_text, author, timestamp, type,
-                           embedding <=> %s::vector AS distance
-                    FROM {partition_name}
-                    ORDER BY embedding <=> %s::vector
+                    SELECT id, clean_text, author, timestamp, type, distance
+                    FROM (
+                        SELECT id, clean_text, author, timestamp, type,
+                               embedding <=> %s::halfvec({dim}) AS distance
+                        FROM {partition_name}
+                        ORDER BY binary_quantize(embedding)::bit({dim})
+                                 <~> binary_quantize(%s::halfvec({dim}))::bit({dim})
+                        LIMIT %s
+                    ) shortlist
+                    ORDER BY distance
                     LIMIT %s
                     """,
-                    (query_embedding.tolist(), query_embedding.tolist(), n_results),
+                    (query_embedding, query_embedding, SHORTLIST_SIZE, n_results),
                 )
                 return cur.fetchall()
     except Exception as e:
@@ -279,7 +305,7 @@ def retrieve_node(state: RAGState) -> RAGState:
             "context": context,
         }
     except Exception as e:
-        error_msg = f"vector type not found in the database"
+        error_msg = "vector type not found in the database"
         logger.exception(f"Database error: {str(e)}")
         return {
             **state,

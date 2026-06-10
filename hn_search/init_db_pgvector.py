@@ -2,6 +2,7 @@ import sys
 from glob import glob
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import psycopg
 from dotenv import load_dotenv
@@ -16,6 +17,10 @@ def get_connection():
     """Get a fresh database connection with vector registration"""
     db_config = get_db_config()
     conn = psycopg.connect(**db_config)
+    # The vector extension must exist before register_vector can find the type.
+    with conn.cursor() as cur:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    conn.commit()
     register_vector(conn)
     return conn
 
@@ -42,7 +47,7 @@ def init_db_from_precomputed(
                 author TEXT,
                 timestamp TEXT,
                 type TEXT,
-                embedding vector(768)
+                embedding halfvec(768)
             )
         """)
         conn.commit()
@@ -67,7 +72,7 @@ def init_db_from_precomputed(
 
     if test_mode:
         parquet_files = parquet_files[:1]
-        print(f"TEST MODE: Processing only first file")
+        print("TEST MODE: Processing only first file")
 
     print(f"Found {len(parquet_files)} parquet files with precomputed embeddings")
 
@@ -95,7 +100,7 @@ def init_db_from_precomputed(
                         conn.close()
                         break
 
-                print(f"  Loading parquet file...")
+                print("  Loading parquet file...")
                 df = pd.read_parquet(parquet_file)
 
                 if test_mode:
@@ -119,7 +124,7 @@ def init_db_from_precomputed(
                             str(row["author"]),
                             str(row["timestamp"]),
                             str(row["type"]),
-                            row["embedding"].tolist(),
+                            np.asarray(row["embedding"], dtype=np.float32),
                         )
                         for _, row in batch_df.iterrows()
                     ]
@@ -160,7 +165,7 @@ def init_db_from_precomputed(
                     pass  # Connection might already be closed
 
                 if retry < max_retries - 1:
-                    print(f"  🔄 Retrying in 5 seconds...")
+                    print("  🔄 Retrying in 5 seconds...")
                     import time
 
                     time.sleep(5)
@@ -171,6 +176,18 @@ def init_db_from_precomputed(
                     continue
 
     print(f"\n✅ Successfully loaded {total_loaded} documents into PostgreSQL")
+
+    # Build the binary-quantized HNSW index for fast, RAM-light search.
+    print("\n🔨 Building binary HNSW index (binary_quantize + bit_hamming_ops)...")
+    conn = get_connection()
+    with conn.cursor() as cur:
+        cur.execute("SET maintenance_work_mem = '1GB'")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS hn_documents_bin_idx ON hn_documents "
+            "USING hnsw ((binary_quantize(embedding)::bit(768)) bit_hamming_ops)"
+        )
+    conn.commit()
+    print("✅ Binary HNSW index ready")
 
     # Final count with fresh connection
     conn = get_connection()

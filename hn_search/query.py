@@ -60,16 +60,26 @@ def query(
     conn = psycopg.connect(**db_config)
     register_vector(conn)
 
+    # Binary-quantized Hamming shortlist + exact cosine rerank (see hn_search.rag.nodes).
+    dim = 768
+    shortlist = int(n_results) * 20
     with conn.cursor() as cur:
+        cur.execute(f"SET hnsw.ef_search = {max(shortlist, 200)}")
         cur.execute(
-            """
-            SELECT id, clean_text, author, timestamp, type,
-                   embedding <=> %s::vector AS distance
-            FROM hn_documents
-            ORDER BY embedding <=> %s::vector
+            f"""
+            SELECT id, clean_text, author, timestamp, type, distance
+            FROM (
+                SELECT id, clean_text, author, timestamp, type,
+                       embedding <=> %s::halfvec({dim}) AS distance
+                FROM hn_documents
+                ORDER BY binary_quantize(embedding)::bit({dim})
+                         <~> binary_quantize(%s::halfvec({dim}))::bit({dim})
+                LIMIT %s
+            ) shortlist
+            ORDER BY distance
             LIMIT %s
             """,
-            (query_embedding.tolist(), query_embedding.tolist(), n_results),
+            (query_embedding, query_embedding, shortlist, n_results),
         )
 
         print("Fetching results...\n", file=sys.stderr)

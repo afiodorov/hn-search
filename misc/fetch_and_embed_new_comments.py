@@ -133,7 +133,7 @@ def fetch_from_bigquery(
         from google.oauth2 import service_account
 
         # Write credentials to a temp file
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
             f.write(creds_json)
             creds_file = f.name
 
@@ -291,6 +291,37 @@ def get_partition_name_for_timestamp(timestamp):
     return f"hn_documents_{dt.year:04d}_{dt.month:02d}"
 
 
+def ensure_partition_exists(conn, partition_name: str):
+    """Create partition table if it doesn't exist"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = %s",
+            (partition_name,),
+        )
+        if cur.fetchone():
+            return  # Table already exists
+
+        print(f"  📦 Creating partition table: {partition_name}")
+        cur.execute(f"""
+            CREATE TABLE {partition_name} (
+                id TEXT PRIMARY KEY,
+                clean_text TEXT NOT NULL,
+                author TEXT,
+                timestamp TEXT,
+                type TEXT,
+                embedding halfvec(768)
+            )
+        """)
+        # Binary-quantized HNSW index for cheap, RAM-resident Hamming shortlisting.
+        # Created on the empty table; HNSW maintains it incrementally as rows insert.
+        cur.execute(f"""
+            CREATE INDEX {partition_name}_bin_idx ON {partition_name}
+            USING hnsw ((binary_quantize(embedding)::bit(768)) bit_hamming_ops)
+        """)
+        conn.commit()
+        print(f"  ✅ Created {partition_name} (halfvec + binary HNSW index)")
+
+
 def upsert_to_db(embedded_parquet_file, df, state=None):
     """Upsert embeddings into partitioned tables with batch processing"""
     print(f"\n🔄 Upserting {len(df):,} documents to database")
@@ -311,6 +342,9 @@ def upsert_to_db(embedded_parquet_file, df, state=None):
             print(
                 f"\n  📋 Processing partition {partition_name} ({len(partition_df):,} rows)"
             )
+
+            # Create partition table if it doesn't exist
+            ensure_partition_exists(conn, partition_name)
 
             # Get existing IDs from the database to avoid duplicates
             with conn.cursor() as cur:
@@ -340,7 +374,7 @@ def upsert_to_db(embedded_parquet_file, df, state=None):
                     str(row["author"]),
                     str(row["timestamp"]),
                     str(row["type"]),
-                    row["embedding"],
+                    np.asarray(row["embedding"], dtype=np.float32),
                 )
                 for _, row in partition_df.iterrows()
             ]
