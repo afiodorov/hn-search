@@ -247,7 +247,7 @@ def answer_node(state: RAGState) -> RAGState:
 
     with log_time(logger, "LLM answer generation"):
         llm = ChatOpenAI(
-            model="deepseek-v4-pro",
+            model="deepseek-v4-flash",
             api_key=os.getenv("DEEPSEEK_API_KEY"),
             base_url="https://api.deepseek.com",
             temperature=0.7,
