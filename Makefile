@@ -1,4 +1,4 @@
-.PHONY: format lint clean fetch embed load index rebuild
+.PHONY: format lint clean fetch embed load index attach rebuild
 
 # Default target - run both formatting and linting
 format:
@@ -26,7 +26,8 @@ clean:
 fetch:
 	uv run --extra dev python misc/fetch_historical.py
 
-# 2. Embed the monthly shards on a GPU box (the vast.ai step).
+# 2. Embed the monthly shards. Runs on THIS machine's GPU — so run it ON the GPU box.
+#    To drive a remote box from your laptop instead, use: ./misc/gpu_embed.sh
 embed:
 	uv run --extra dev python misc/generate_embeddings_gpu.py
 
@@ -38,5 +39,10 @@ load:
 index:
 	uv run python misc/build_binary_index.py
 
-# Embed + load (run after `make fetch`); embed needs a GPU.
-rebuild: embed load
+# Attach monthly tables under the partitioned parent `hn_documents` so the web path
+# queries them in one MergeAppend. Idempotent; re-run after new months are added.
+attach:
+	uv run python misc/attach_partitions.py
+
+# Embed + load + attach (run after `make fetch`); embed needs a GPU.
+rebuild: embed load attach

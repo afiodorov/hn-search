@@ -1,6 +1,4 @@
 import os
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -26,22 +24,22 @@ logger = get_logger(__name__)
 # Vector search config (binary-quantized HNSW + exact rerank).
 # Embeddings are stored as halfvec(768); a bit_hamming_ops HNSW index over
 # binary_quantize(embedding) gives a ~10x smaller, RAM-resident index. We shortlist
-# by Hamming distance then rerank the shortlist by exact cosine — recall@10 matches
-# exact search for this data (ties aside) at a fraction of the RAM. See README.
+# by Hamming distance then rerank by exact cosine — recall@10 matches exact search
+# for this data (ties aside) at a fraction of the RAM. See README.
+#
+# hn_documents is a partitioned parent (PARTITION BY RANGE on timestamp) over the
+# monthly hn_documents_YYYY_MM tables, so a single query fans out across each
+# partition's binary index via a MergeAppend — no application-side fan-out. Run
+# misc/attach_partitions.py after new months are added.
 EMBEDDING_DIM = 768
-# How many Hamming candidates to rerank per partition. Larger = marginally better
-# recall, slightly slower. 200 is well past the recall plateau for this corpus.
+# How many Hamming candidates to rerank. Larger = marginally better recall, slightly
+# slower. 200 is well past the recall plateau for this corpus.
 SHORTLIST_SIZE = int(os.getenv("HN_SHORTLIST_SIZE", "200"))
 # HNSW search breadth; must be >= the shortlist LIMIT to return that many candidates.
 EF_SEARCH = max(SHORTLIST_SIZE, int(os.getenv("HN_EF_SEARCH", "200")))
 
 # Initialize connection pool (singleton)
 _connection_pool = None
-
-# Cache partition names (refreshed periodically)
-_partition_cache = None
-_partition_cache_timestamp = 0
-_PARTITION_CACHE_TTL = 3600  # 1 hour
 
 
 def get_connection_pool():
@@ -71,20 +69,20 @@ def get_connection_pool():
     return _connection_pool
 
 
-def _query_partition(pool, partition_name: str, query_embedding, n_results: int):
-    """Query one partition: Hamming shortlist on the binary index, then exact rerank.
+def _search(pool, query_embedding, n_results: int):
+    """Hamming shortlist on the binary index, then exact cosine rerank.
 
-    The inner query uses the binary HNSW index (cheap, RAM-resident) to pull the
-    SHORTLIST_SIZE nearest candidates by Hamming distance; the outer query reranks
-    just those by exact cosine and keeps the top n_results. Returned distances are
-    exact cosine, so they remain comparable when merged across partitions.
+    One query against the partitioned parent `hn_documents`: Postgres does a
+    MergeAppend across each monthly partition's binary HNSW index to build the global
+    Hamming shortlist (SHORTLIST_SIZE), and the outer query reranks that shortlist by
+    exact cosine. Returns rows already ordered by ascending cosine distance.
     """
     dim = EMBEDDING_DIM
     try:
         with pool.connection() as conn:
             with conn.cursor() as cur:
-                # SET LOCAL keeps this scoped to the current transaction. SET does
-                # not accept bind parameters, so inline the (int) value safely.
+                # SET LOCAL scopes this to the current transaction; SET takes no bind
+                # params, so the (int) value is inlined safely.
                 cur.execute(f"SET LOCAL hnsw.ef_search = {EF_SEARCH}")
                 cur.execute(
                     f"""
@@ -92,7 +90,7 @@ def _query_partition(pool, partition_name: str, query_embedding, n_results: int)
                     FROM (
                         SELECT id, clean_text, author, timestamp, type,
                                embedding <=> %s::halfvec({dim}) AS distance
-                        FROM {partition_name}
+                        FROM hn_documents
                         ORDER BY binary_quantize(embedding)::bit({dim})
                                  <~> binary_quantize(%s::halfvec({dim}))::bit({dim})
                         LIMIT %s
@@ -104,89 +102,8 @@ def _query_partition(pool, partition_name: str, query_embedding, n_results: int)
                 )
                 return cur.fetchall()
     except Exception as e:
-        logger.warning(f"Error querying partition {partition_name}: {e}")
+        logger.warning(f"Error during vector search: {e}")
         return []
-
-
-def _get_partitions(pool):
-    """
-    Get list of all partition table names.
-
-    Cached for 1 hour since partitions rarely change (only monthly).
-    """
-    global _partition_cache, _partition_cache_timestamp
-
-    current_time = time.time()
-
-    # Return cached value if still fresh
-    if (
-        _partition_cache
-        and (current_time - _partition_cache_timestamp) < _PARTITION_CACHE_TTL
-    ):
-        logger.debug(
-            f"Using cached partition list ({len(_partition_cache)} partitions)"
-        )
-        return _partition_cache
-
-    # Fetch fresh partition list
-    logger.info("Fetching partition list from database")
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT tablename
-                FROM pg_tables
-                WHERE schemaname = 'public'
-                  AND tablename LIKE 'hn_documents_%'
-                ORDER BY tablename
-            """)
-            partitions = [row[0] for row in cur.fetchall()]
-
-    # Update cache
-    _partition_cache = partitions
-    _partition_cache_timestamp = current_time
-    logger.info(f"Cached {len(partitions)} partitions")
-
-    return partitions
-
-
-def _parallel_partition_search(pool, query_embedding, n_results: int):
-    """
-    Query all partitions in parallel and return combined results.
-
-    Uses ThreadPoolExecutor to query multiple partitions concurrently,
-    then merges results. Much faster than sequential partition scanning.
-    """
-    partitions = _get_partitions(pool)
-    logger.info(f"Querying {len(partitions)} partitions in parallel")
-
-    all_results = []
-
-    # Use max_workers based on connection pool size (leave some headroom)
-    max_workers = min(15, len(partitions))  # Use up to 15 connections
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all partition queries
-        future_to_partition = {
-            executor.submit(
-                _query_partition, pool, partition, query_embedding, n_results
-            ): partition
-            for partition in partitions
-        }
-
-        # Collect results as they complete
-        for future in as_completed(future_to_partition):
-            partition = future_to_partition[future]
-            try:
-                results = future.result()
-                all_results.extend(results)
-                logger.debug(f"Partition {partition}: {len(results)} results")
-            except Exception as e:
-                logger.exception(f"Exception querying partition {partition}: {e}")
-
-    logger.info(
-        f"Retrieved {len(all_results)} total results from {len(partitions)} partitions"
-    )
-    return all_results
 
 
 def retrieve_node(state: RAGState) -> RAGState:
@@ -240,16 +157,12 @@ def retrieve_node(state: RAGState) -> RAGState:
         # Get connection from pool
         pool = get_connection_pool()
 
-        # Query partitions in parallel
-        with log_time(logger, "parallel vector search across partitions"):
-            all_results = _parallel_partition_search(pool, query_embedding, n_results)
+        # One query against the partitioned parent: MergeAppend across the per-month
+        # binary indexes builds the shortlist, then exact cosine rerank. Already ordered.
+        with log_time(logger, "vector search (shortlist + rerank)"):
+            results = _search(pool, query_embedding, n_results)
 
-        # Merge and sort results from all partitions
-        with log_time(logger, "merging partition results"):
-            # Sort by distance and take top n_results
-            all_results.sort(key=lambda x: x[5])  # Sort by distance (index 5)
-            results = all_results[:n_results]
-
+        with log_time(logger, "building results"):
             search_results = []
             cache_data = []
 

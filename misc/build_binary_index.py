@@ -87,7 +87,7 @@ def main():
     )
     args = ap.parse_args()
 
-    mwm = os.getenv("MAINTENANCE_WORK_MEM", "1GB")
+    mwm = os.getenv("MAINTENANCE_WORK_MEM", "256MB")
 
     cfg = get_db_config()
     print(f"Connecting to {cfg['host']}:{cfg['port']}/{cfg['dbname']}")
@@ -95,10 +95,10 @@ def main():
     conn = psycopg.connect(**cfg, autocommit=True)
     cur = conn.cursor()
     cur.execute(f"SET maintenance_work_mem = '{mwm}'")
-    try:
-        cur.execute("SET max_parallel_maintenance_workers = 4")
-    except Exception:
-        pass
+    # Serial build: managed Postgres (Railway) has a small shared-memory segment, and
+    # pgvector's parallel HNSW build's DSM allocation fails on it ("No space left on
+    # device"). The binary index is tiny, so a serial build is fine.
+    cur.execute("SET max_parallel_maintenance_workers = 0")
 
     tables = find_tables(cur)
     if not tables:

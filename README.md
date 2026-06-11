@@ -172,17 +172,31 @@ and GCP credentials for BigQuery (`GOOGLE_CLOUD_PROJECT` / `GOOGLE_APPLICATION_C
 #    Defaults to 2023-01 .. current month; override with --start/--end YYYY-MM.
 make fetch                 # → data/raw/month_*.parquet
 
-# 2. Embed on a GPU box (rent one, e.g. vast.ai). Copy data/raw up, then:
-make embed                 # → data/embedded/month_*.parquet  (resumable per month)
-#    Sync finished files back as they complete:
-#      rsync -avz -e "ssh -p PORT" user@host:/path/data/embedded/ data/embedded/
+# 2. Embed on a rented GPU box (e.g. vast.ai). `make embed` runs LOCALLY on whatever
+#    machine you invoke it on, using that machine's GPU — so it runs ON the box, not
+#    from your laptop. The helper below drives it from your laptop end to end: it
+#    pushes code + data/raw (NO secrets — embedding needs none), installs CUDA torch,
+#    and starts the embed in a remote tmux session (survives disconnects, resumable).
+REMOTE_HOST=root@1.2.3.4 REMOTE_PORT=22 ./misc/gpu_embed.sh
+#    Then pull finished months back as they complete:
+REMOTE_HOST=root@1.2.3.4 REMOTE_PORT=22 \
+  REMOTE_DIR=/root/hn-search/data/embedded ./misc/sync_embeddings.sh
+#    (Or, if you're already on the box: just run `make embed`.)
 
 # 3. Load embedded months into partitions (halfvec + binary HNSW index per month).
+#    Run from wherever has DATABASE_URL (loading box -> Railway directly is fastest).
 make load                  # populates hn_documents_YYYY_MM, builds binary indexes
+
+# 4. Attach the monthly tables under one partitioned parent `hn_documents`, so the
+#    web path queries them in a single MergeAppend. Idempotent — re-run after new
+#    months are added by the incremental fetcher.
+make attach
 ```
 
-`misc/fetch_and_embed_new_comments.py` then keeps it current with incremental
-monthly pulls. The GPU is only needed for step 2; serving uses ONNX (no torch).
+The GPU is only needed for step 2, and that box needs **no credentials** — only the
+public model (auto-downloaded from HuggingFace) and your raw parquet files. Destroy the
+instance once `data/embedded` is synced back. `misc/fetch_and_embed_new_comments.py`
+then keeps the corpus current with incremental monthly pulls; serving uses ONNX (no torch).
 
 ## 💡 Usage
 
@@ -296,7 +310,9 @@ identical cosine distance, e.g. duplicate comments).
 - ONNX Runtime query encoder — ~300 MB RAM vs ~1.5 GB for torch, no torch at serve
 - Redis caching layer reduces repeated queries to <100ms
 - Connection pooling with psycopg3
-- Partitioned tables queried in parallel, results merged by exact distance
+- Native monthly range partitioning: a single query against the parent
+  `hn_documents` fans out across each partition's binary index via a Postgres
+  `MergeAppend` (verified in the plan) — no application-side fan-out
 
 ### RAG Pipeline
 

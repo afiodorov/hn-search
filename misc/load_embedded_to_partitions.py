@@ -69,8 +69,13 @@ def ensure_partition(conn, table: str):
 
 def build_index(conn, table: str):
     with conn.cursor() as cur:
+        # Managed Postgres (Railway) has a small shared-memory segment, so pgvector's
+        # PARALLEL HNSW build fails allocating its DSM ("No space left on device").
+        # Build serially (no parallel workers -> no shared-memory segment); the binary
+        # index is tiny, so backend-local maintenance_work_mem is plenty.
+        cur.execute("SET max_parallel_maintenance_workers = 0")
         cur.execute(
-            f"SET maintenance_work_mem = '{os.getenv('MAINTENANCE_WORK_MEM', '1GB')}'"
+            f"SET maintenance_work_mem = '{os.getenv('MAINTENANCE_WORK_MEM', '256MB')}'"
         )
         cur.execute(
             f"CREATE INDEX IF NOT EXISTS {table}_bin_idx ON {table} "
