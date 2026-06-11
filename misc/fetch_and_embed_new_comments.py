@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 """
-Script to fetch new HN comments from BigQuery, generate embeddings using MPS (Mac GPU),
-and upsert them into partitioned PostgreSQL tables.
+Fetch new HN comments from BigQuery, embed with the ONNX encoder, and upsert into
+the partitioned PostgreSQL tables. Runs on the serve container (no torch needed).
 
 Idempotent and resumable - can be interrupted and restarted at any point.
 
 Usage:
-    uv run python misc/fetch_and_embed_new_comments.py [--resume] [--skip-fetch] [--skip-embed] [--skip-upsert]
+    uv run python misc/fetch_and_embed_new_comments.py
+    uv run python misc/fetch_and_embed_new_comments.py [--skip-fetch] [--skip-embed] [--skip-upsert]
 """
 
 import argparse
@@ -20,12 +21,11 @@ import html2text
 import numpy as np
 import pandas as pd
 import psycopg
-import torch
 from dotenv import load_dotenv
 from google.cloud import bigquery
 from pgvector.psycopg import register_vector
-from sentence_transformers import SentenceTransformer
 
+from hn_search.common import get_model
 from hn_search.db_config import get_db_config
 
 load_dotenv()
@@ -146,8 +146,8 @@ def fetch_from_bigquery(
         client = bigquery.Client(project=project)
 
     print(f"💰 Using GCP project: {client.project}")
-    print(f"   Account: Run 'gcloud auth list' to see active account")
-    print(f"   Tip: Set billing alerts at https://console.cloud.google.com/billing/")
+    print("   Account: Run 'gcloud auth list' to see active account")
+    print("   Tip: Set billing alerts at https://console.cloud.google.com/billing/")
 
     query = f"""
     SELECT
@@ -191,40 +191,19 @@ def fetch_from_bigquery(
     return filepath
 
 
-def generate_embeddings_mps(
+def generate_embeddings(
     parquet_file, state=None
 ) -> Tuple[Optional[Path], Optional[pd.DataFrame]]:
-    """Generate embeddings using MPS (Mac GPU) - saves progress incrementally"""
+    """Embed new comments using the ONNX encoder (no torch/GPU required)."""
     output_file = Path(str(parquet_file).replace(".parquet", "_embedded.parquet"))
 
-    # Check if embeddings already exist
     if output_file.exists():
         print(f"✅ Found existing embedded file: {output_file}")
-        df = pd.read_parquet(output_file)
-        return output_file, df
-
-    # Check for MPS availability
-    if torch.backends.mps.is_available():
-        device = "mps"
-        print("🚀 Using MPS (Apple Silicon GPU)")
-    elif torch.cuda.is_available():
-        device = "cuda"
-        print(f"🚀 Using CUDA GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        device = "cpu"
-        print("⚠️  Using CPU (no GPU available)")
-
-    model = SentenceTransformer(
-        "sentence-transformers/all-mpnet-base-v2", device=device
-    )
+        return output_file, pd.read_parquet(output_file)
 
     print(f"\n🔄 Loading {parquet_file}")
     df = pd.read_parquet(parquet_file)
     df = df[df["text"].notna() & (df["text"] != "")]
-
-    print(f"Processing {len(df):,} documents")
-
-    # Clean text
     df["clean_text"] = df["text"].astype(str).apply(strip_html)
     df = df[df["clean_text"].str.len() > 0]
 
@@ -232,51 +211,26 @@ def generate_embeddings_mps(
         print("No valid documents after cleaning")
         return None, None
 
-    # Generate embeddings in chunks and save incrementally
-    chunk_size = 1000  # Save every 1000 documents
-    encode_batch_size = 128
-
+    print(f"Processing {len(df):,} documents with ONNX encoder...")
+    model = get_model()
     documents = df["clean_text"].tolist()
+    batch_size = 64
     all_embeddings = []
-
     temp_output = output_file.with_suffix(".parquet.tmp")
 
-    for chunk_start in range(0, len(documents), chunk_size):
-        chunk_end = min(chunk_start + chunk_size, len(documents))
-        chunk_docs = documents[chunk_start:chunk_end]
-
-        print(
-            f"\n📦 Processing chunk {chunk_start // chunk_size + 1}/{(len(documents) - 1) // chunk_size + 1}"
-        )
-
-        chunk_embeddings = []
-        for batch_start in range(0, len(chunk_docs), encode_batch_size):
-            batch = chunk_docs[batch_start : batch_start + encode_batch_size]
-            print(
-                f"  Encoding batch {batch_start // encode_batch_size + 1}/{(len(chunk_docs) - 1) // encode_batch_size + 1}"
-            )
-
-            embeddings = model.encode(
-                batch,
-                batch_size=encode_batch_size,
-                show_progress_bar=False,
-                convert_to_numpy=True,
-            )
-            chunk_embeddings.extend(embeddings)
-
-        all_embeddings.extend(chunk_embeddings)
-
-        # Save intermediate progress
-        partial_df = df.iloc[:chunk_end].copy()
-        partial_df["embedding"] = [emb.tolist() for emb in all_embeddings]
+    for start in range(0, len(documents), batch_size * 16):
+        end = min(start + batch_size * 16, len(documents))
+        batch_embs = model.encode(documents[start:end])
+        all_embeddings.extend(batch_embs)
+        # save progress every ~1k docs
+        partial_df = df.iloc[:end].copy()
+        partial_df["embedding"] = [e.tolist() for e in all_embeddings]
         partial_df.to_parquet(temp_output, index=False)
-        print(f"  💾 Saved progress: {chunk_end}/{len(documents)} documents")
+        print(f"  💾 {end}/{len(documents)} embedded")
 
-    # Final save - rename temp to final
-    df["embedding"] = [emb.tolist() for emb in all_embeddings]
+    df["embedding"] = [e.tolist() for e in all_embeddings]
     temp_output.rename(output_file)
     print(f"\n✅ Saved all embeddings to {output_file}")
-
     return output_file, df
 
 
@@ -496,7 +450,7 @@ def main():
     embedded_file = None
     df = None
     if not args.skip_embed:
-        embedded_file, df = generate_embeddings_mps(parquet_file, state=state)
+        embedded_file, df = generate_embeddings(parquet_file, state=state)
         if not embedded_file:
             print("❌ Embedding generation failed")
             return
@@ -519,6 +473,16 @@ def main():
         save_state(state)
     else:
         print("⏭️  Skipping upsert step")
+
+    # Step 6: Attach any new monthly partitions to the parent hn_documents table
+    # so the web path picks them up immediately without a manual make attach.
+    print("\n🔗 Attaching any new partitions to hn_documents parent...")
+    try:
+        from misc.attach_partitions import main as attach_main
+
+        attach_main()
+    except Exception as e:
+        print(f"⚠️  attach_partitions warning (non-fatal): {e}")
 
     print("\n" + "=" * 80)
     print("✅ All done!")
