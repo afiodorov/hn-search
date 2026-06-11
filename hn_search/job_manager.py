@@ -178,28 +178,34 @@ class JobManager:
         except Exception as e:
             logger.exception(f"⚠️ Error storing error for job {job_id[:8]}: {e}")
 
-    def update_progress(self, job_id: str, progress: str):
-        """Update job progress for streaming updates."""
+    def append_progress_event(self, job_id: str, event: Dict[str, Any]):
+        """Append a progress event to the job's JSON event list.
+
+        Single writer (the claimer), so read-modify-write is safe.
+        """
         if not self.redis:
             return
 
         try:
             progress_key = f"job:{job_id}:progress"
-            self.redis.setex(progress_key, 300, progress)  # 5 min TTL
+            raw = self.redis.get(progress_key)
+            events = json.loads(raw) if raw else []
+            events.append(event)
+            self.redis.setex(progress_key, 300, json.dumps(events))  # 5 min TTL
         except Exception:
             pass  # Silent fail for progress updates
 
-    def get_progress(self, job_id: str) -> Optional[str]:
-        """Get current job progress."""
+    def get_progress_events(self, job_id: str) -> list:
+        """Get the job's progress events (empty list if none)."""
         if not self.redis:
-            return None
+            return []
 
         try:
             progress_key = f"job:{job_id}:progress"
-            progress = self.redis.get(progress_key)
-            return progress.decode() if progress else None
+            raw = self.redis.get(progress_key)
+            return json.loads(raw) if raw else []
         except Exception:
-            return None
+            return []
 
     def get_result(self, job_id: str) -> Optional[Dict]:
         """Get completed job result."""

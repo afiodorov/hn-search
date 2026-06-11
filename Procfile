@@ -1,1 +1,1 @@
-web: uv run python -m hn_search.rag.web_ui
+web: uv run python -m hn_search.api

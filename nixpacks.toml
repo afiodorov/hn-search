@@ -1,5 +1,0 @@
-[phases.setup]
-nixPkgs = ["python313"]
-
-[variables]
-NIXPACKS_UV_VERSION = "0.8.19"

@@ -218,15 +218,15 @@ def generate_embeddings(
     all_embeddings = []
     temp_output = output_file.with_suffix(".parquet.tmp")
 
-    for start in range(0, len(documents), batch_size * 16):
-        end = min(start + batch_size * 16, len(documents))
+    for start in range(0, len(documents), batch_size):
+        end = min(start + batch_size, len(documents))
         batch_embs = model.encode(documents[start:end])
         all_embeddings.extend(batch_embs)
-        # save progress every ~1k docs
-        partial_df = df.iloc[:end].copy()
-        partial_df["embedding"] = [e.tolist() for e in all_embeddings]
-        partial_df.to_parquet(temp_output, index=False)
-        print(f"  💾 {end}/{len(documents)} embedded")
+        if end % (batch_size * 16) == 0 or end == len(documents):
+            partial_df = df.iloc[:end].copy()
+            partial_df["embedding"] = [e.tolist() for e in all_embeddings]
+            partial_df.to_parquet(temp_output, index=False)
+            print(f"  💾 {end}/{len(documents)} embedded")
 
     df["embedding"] = [e.tolist() for e in all_embeddings]
     temp_output.rename(output_file)

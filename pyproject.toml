@@ -15,7 +15,9 @@ dependencies = [
     "langchain-openai",
     "langchain-community>=0.3.30",
     "python-dotenv",
-    "gradio",
+    "fastapi>=0.115",
+    "sse-starlette>=2.1",
+    "uvicorn[standard]>=0.24",
     "pyarrow",
     "pandas",
     "psycopg[binary,pool]>=3.0",
@@ -37,10 +39,6 @@ dev = [
     "google-cloud-bigquery-storage>=2.0.0",
     "html2text>=2025.4.15",
     "ruff",
-]
-prod = [
-    "gunicorn>=21.0.0",
-    "uvicorn[standard]>=0.24.0",
 ]
 
 [tool.ruff]

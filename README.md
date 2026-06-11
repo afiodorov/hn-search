@@ -220,21 +220,29 @@ uv run python -m hn_search.query "best practices for system design" 20
 ### 2. RAG System (Web UI)
 
 ```bash
-# Start the Gradio web interface
-uv run python -m hn_search.rag.web_ui
+# Build the React frontend (once, or after frontend changes)
+cd frontend && npm install && npm run build && cd ..
 
-# Open http://localhost:7860
+# Start the FastAPI server (serves the API + built frontend)
+uv run python -m hn_search.api
+
+# Open http://localhost:8000
 # Ask questions like:
 #   "What are the main criticisms of microservices?"
 #   "How do people debug production issues?"
 #   "What do HN users think about AI coding assistants?"
+
+# Frontend development with hot reload (proxies /api to :8000):
+cd frontend && npm run dev
 ```
 
 **Features**:
-- Real-time streaming responses
+- Live progress with per-step timings (cache lookups, embedding, pgvector search, LLM)
+- Token-by-token answer streaming over SSE
 - Source citations with HN links
+- Recent searches sidebar
 - URL parameter support: `?q=your+question`
-- Auto-search from URL parameters
+- Dark mode
 
 ### 3. Incremental Data Updates
 
@@ -461,12 +469,14 @@ hn-search/
 │   ├── db_config.py       # Database connection config
 │   ├── cache_config.py    # Redis caching layer
 │   ├── common.py          # Shared utilities
+│   ├── api/               # FastAPI backend (SSE search, recent queries, static UI)
 │   └── rag/               # RAG system
 │       ├── graph.py       # LangGraph workflow
 │       ├── nodes.py       # Retrieve & Answer nodes
+│       ├── pipeline.py    # Streaming pipeline (progress + token events)
 │       ├── state.py       # State management
-│       ├── cli.py         # CLI interface
-│       └── web_ui.py      # Gradio web interface
+│       └── cli.py         # CLI interface
+├── frontend/               # React + Vite + TS web UI
 ├── misc/                   # Utility scripts
 │   ├── generate_embeddings_gpu.py  # Batch embedding generation
 │   └── fetch_and_embed_new_comments.py  # Incremental updates
