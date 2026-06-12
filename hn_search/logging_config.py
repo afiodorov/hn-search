@@ -4,8 +4,6 @@ import logging
 import sys
 import time
 from contextlib import contextmanager
-from functools import wraps
-from typing import Any, Callable
 
 
 def setup_logging(level: str = "INFO"):
@@ -47,39 +45,6 @@ def log_time(logger: logging.Logger, operation: str, level: str = "INFO"):
             getattr(logging, level.upper()),
             f"⏱️  {operation} - completed in {elapsed:.2f}s",
         )
-
-
-def log_time_decorator(operation: str = None, level: str = "INFO"):
-    """
-    Decorator to log execution time of a function.
-
-    Usage:
-        @log_time_decorator("process query")
-        def my_function():
-            pass
-    """
-
-    def decorator(func: Callable) -> Callable:
-        op_name = operation or f"{func.__module__}.{func.__name__}"
-
-        @wraps(func)
-        def wrapper(*args, **kwargs) -> Any:
-            logger = logging.getLogger(func.__module__)
-            start = time.time()
-            logger.log(getattr(logging, level.upper()), f"⏱️  {op_name} - starting")
-            try:
-                result = func(*args, **kwargs)
-                return result
-            finally:
-                elapsed = time.time() - start
-                logger.log(
-                    getattr(logging, level.upper()),
-                    f"⏱️  {op_name} - completed in {elapsed:.2f}s",
-                )
-
-        return wrapper
-
-    return decorator
 
 
 # Initialize logging on import

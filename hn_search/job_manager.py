@@ -5,6 +5,7 @@ import json
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from hn_search.cache_config import RESULT_CACHE_TTL
 from hn_search.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -16,7 +17,7 @@ class JobManager:
     def __init__(self, redis_client=None):
         self.redis = redis_client
         self.job_timeout = 180  # 3 minutes (reduced from 10)
-        self.result_ttl = 21600  # 6 hours
+        self.result_ttl = RESULT_CACHE_TTL
         self.poll_interval = 0.5  # 500ms
         self.max_poll_time = 120  # 2 minutes (reduced from 5)
 
@@ -66,80 +67,6 @@ class JobManager:
             logger.exception(f"⚠️ Job claim error: {e}")
             # Fallback: allow processing if Redis fails
             return True, job_id
-
-    def wait_for_job(
-        self, job_id: str, timeout: Optional[int] = None
-    ) -> Optional[Dict]:
-        """
-        Wait for another process to complete the job.
-
-        Returns:
-            Result dict if job completes, None if timeout or error
-        """
-        if not self.redis:
-            return None
-
-        timeout = timeout or self.max_poll_time
-        start_time = time.time()
-        result_key = f"job:{job_id}:result"
-        status_key = f"job:{job_id}:status"
-        error_key = f"job:{job_id}:error"
-
-        logger.info(
-            f"⏳ Waiting for job {job_id[:8]}... (another request is processing)"
-        )
-
-        while time.time() - start_time < timeout:
-            try:
-                status = self.redis.get(status_key)
-
-                if status == b"completed":
-                    result = self.redis.get(result_key)
-                    if result:
-                        elapsed = time.time() - start_time
-                        logger.info(
-                            f"✅ Job {job_id[:8]} completed by another request (waited {elapsed:.2f}s)"
-                        )
-                        return json.loads(result)
-
-                elif status == b"failed":
-                    error = self.redis.get(error_key)
-                    error_msg = error.decode() if error else "Unknown error"
-                    logger.error(f"❌ Job {job_id[:8]} failed: {error_msg}")
-                    return None
-
-                elif status is None:
-                    # Job disappeared (expired or deleted)
-                    logger.warning(f"⚠️ Job {job_id[:8]} disappeared")
-                    return None
-
-                # Still processing - wait and retry
-                time.sleep(self.poll_interval)
-
-            except Exception as e:
-                logger.exception(f"⚠️ Error polling job {job_id[:8]}: {e}")
-                return None
-
-        logger.warning(f"⏱️ Timeout waiting for job {job_id[:8]} after {timeout}s")
-        # Force-clear the stuck job to allow retry
-        self.clear_job(job_id)
-        return None
-
-    def clear_job(self, job_id: str):
-        """Force-clear a stuck job to allow retry."""
-        if not self.redis:
-            return
-
-        try:
-            status_key = f"job:{job_id}:status"
-            result_key = f"job:{job_id}:result"
-            error_key = f"job:{job_id}:error"
-            progress_key = f"job:{job_id}:progress"
-
-            self.redis.delete(status_key, result_key, error_key, progress_key)
-            logger.info(f"🗑️ Cleared stuck job {job_id[:8]}")
-        except Exception as e:
-            logger.exception(f"⚠️ Error clearing job {job_id[:8]}: {e}")
 
     def store_result(self, job_id: str, result: Dict[str, Any]):
         """Store job result and mark as completed."""

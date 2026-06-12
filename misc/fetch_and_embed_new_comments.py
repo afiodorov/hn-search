@@ -276,7 +276,7 @@ def ensure_partition_exists(conn, partition_name: str):
         print(f"  ✅ Created {partition_name} (halfvec + binary HNSW index)")
 
 
-def upsert_to_db(embedded_parquet_file, df, state=None):
+def upsert_to_db(df, state=None):
     """Upsert embeddings into partitioned tables with batch processing"""
     print(f"\n🔄 Upserting {len(df):,} documents to database")
 
@@ -467,7 +467,7 @@ def main():
 
     # Step 5: Upsert to database
     if not args.skip_upsert:
-        upsert_to_db(embedded_file, df, state=state)
+        upsert_to_db(df, state=state)
         state["completed"] = True
         state["completed_at"] = datetime.now().isoformat()
         save_state(state)

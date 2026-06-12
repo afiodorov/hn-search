@@ -33,11 +33,6 @@ logger = get_logger(__name__)
 _encoder = None
 
 
-def get_device() -> str:
-    """Kept for API compatibility; ONNX serve path is CPU-only."""
-    return "cpu"
-
-
 class OnnxEncoder:
     """Drop-in replacement for the sentence-transformers encoder used at serve time.
 
@@ -100,7 +95,7 @@ class OnnxEncoder:
         return embeddings.astype(np.float32)
 
 
-def get_model(device=None) -> OnnxEncoder:
+def get_model() -> OnnxEncoder:
     """Get or create the singleton ONNX query encoder."""
     global _encoder
     if _encoder is None:

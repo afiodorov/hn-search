@@ -186,9 +186,9 @@ The community has mixed views on this topic. As user john_doe explains, "Python 
 
 
 def make_llm() -> ChatOpenAI:
-    # cache=False: the global LangChain Redis LLM cache (set_llm_cache in
-    # cache_config) is unreliable with .stream(); the explicit
-    # get_cached_answer/cache_answer functions are the real answer cache.
+    # cache=False: opt out of any global LangChain LLM cache (unreliable with
+    # .stream()); the explicit get_cached_answer/cache_answer functions are
+    # the real answer cache.
     return ChatOpenAI(
         model="deepseek-v4-flash",
         api_key=os.getenv("DEEPSEEK_API_KEY"),

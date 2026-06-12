@@ -8,8 +8,6 @@ from urllib.parse import urlparse
 
 import redis
 from dotenv import load_dotenv
-from langchain.globals import set_llm_cache
-from langchain_community.cache import RedisCache
 
 from hn_search.logging_config import get_logger
 
@@ -39,58 +37,21 @@ def sanitize_url(url: str) -> str:
 # Redis configuration
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
+# Job results, vector search, and answer caches must expire together: the SSE
+# replay path assumes a completed job implies warm pipeline caches.
+RESULT_CACHE_TTL = 43200  # 12 hours
+
 # Initialize Redis client
 try:
     redis_client = redis.from_url(REDIS_URL)
     # Test connection
     redis_client.ping()
 
-    # Set up LangChain Redis cache
-    cache = RedisCache(redis_client)
-    set_llm_cache(cache)
-
     logger.info(f"✅ Redis cache initialized at {sanitize_url(REDIS_URL)}")
 except Exception as e:
     logger.warning(f"⚠️ Redis cache not available: {e}")
     logger.warning("🔄 Running without cache")
     redis_client = None
-
-
-# PostgreSQL query cache functions
-def get_pg_cache_key(query: str, params: tuple = ()) -> str:
-    """Generate a cache key for PostgreSQL queries."""
-    # Combine query and params for unique key
-    cache_str = f"{query}:{str(params)}"
-    return f"pg:{hashlib.md5(cache_str.encode()).hexdigest()}"
-
-
-def get_cached_pg_results(
-    query: str, params: tuple = ()
-) -> Optional[List[Dict[str, Any]]]:
-    """Get cached PostgreSQL query results."""
-    if not redis_client:
-        return None
-    try:
-        cache_key = get_pg_cache_key(query, params)
-        cached = redis_client.get(cache_key)
-        if cached:
-            return json.loads(cached)
-    except Exception:
-        pass
-    return None
-
-
-def cache_pg_results(
-    query: str, results: List[Dict[str, Any]], params: tuple = (), ttl: int = 3600
-):
-    """Cache PostgreSQL query results with TTL (default 1 hour)."""
-    if not redis_client:
-        return
-    try:
-        cache_key = get_pg_cache_key(query, params)
-        redis_client.setex(cache_key, ttl, json.dumps(results))
-    except Exception:
-        pass
 
 
 # Vector search cache functions
@@ -113,15 +74,13 @@ def get_cached_vector_search(query: str, k: int = 10) -> Optional[List[Dict[str,
     return None
 
 
-def cache_vector_search(
-    query: str, results: List[Dict[str, Any]], k: int = 10, ttl: int = 21600
-):
-    """Cache vector search results with TTL (default 6 hours)."""
+def cache_vector_search(query: str, results: List[Dict[str, Any]], k: int = 10):
+    """Cache vector search results."""
     if not redis_client:
         return
     try:
         cache_key = get_vector_cache_key(query, k)
-        redis_client.setex(cache_key, ttl, json.dumps(results))
+        redis_client.setex(cache_key, RESULT_CACHE_TTL, json.dumps(results))
     except Exception:
         pass
 
@@ -148,26 +107,12 @@ def get_cached_answer(query: str, context: str) -> Optional[str]:
     return None
 
 
-def cache_answer(query: str, context: str, answer: str, ttl: int = 21600):
-    """Cache LLM answer with TTL (default 6 hours)."""
+def cache_answer(query: str, context: str, answer: str):
+    """Cache LLM answer."""
     if not redis_client:
         return
     try:
         cache_key = get_answer_cache_key(query, context)
-        redis_client.setex(cache_key, ttl, answer)
+        redis_client.setex(cache_key, RESULT_CACHE_TTL, answer)
     except Exception:
         pass
-
-
-# Clear cache utility
-def clear_cache(pattern: str = "*"):
-    """Clear cache entries matching pattern."""
-    if not redis_client:
-        return
-    try:
-        keys = redis_client.keys(pattern)
-        if keys:
-            redis_client.delete(*keys)
-            logger.info(f"🗑️ Cleared {len(keys)} cache entries")
-    except Exception as e:
-        logger.exception(f"❌ Error clearing cache: {e}")
