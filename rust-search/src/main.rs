@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 use axum::{
-    extract::{Json, State},
+    extract::{DefaultBodyLimit, Json, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -289,7 +289,12 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/search", post(search))
-        .route("/append", post(append))
+        // axum defaults request bodies to 2MB; /append batches are several MB of
+        // JSON embeddings, so lift the cap to match Caddy's 64MB.
+        .route(
+            "/append",
+            post(append).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route("/max_id", get(max_id))
         .with_state(state);
 

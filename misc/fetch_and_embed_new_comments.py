@@ -176,8 +176,13 @@ def generate_embeddings(parquet_file, state=None) -> Tuple[Optional[Path], Optio
     return output_file, df
 
 
-def append_to_rust(df, batch_size=500):
-    """POST embedded rows to the Rust service /append (dedup is server-side)."""
+def append_to_rust(df, batch_size=1000):
+    """POST embedded rows to the Rust service /append (dedup is server-side).
+
+    Each row carries a 768-d f32 embedding (~10 KB of JSON), so a batch of 1000 is
+    ~10 MB. The service and Caddy both cap request bodies at 64 MB; keep batches
+    well under that.
+    """
     import httpx
 
     url, headers = _search_service()
