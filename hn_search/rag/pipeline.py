@@ -23,6 +23,7 @@ from hn_search.cache_config import (
 )
 from hn_search.common import get_model
 from hn_search.logging_config import get_logger
+from hn_search.search_backend import BACKEND, dispatch_search
 
 from .nodes import (
     _search,
@@ -36,6 +37,12 @@ from .nodes import (
 )
 
 logger = get_logger(__name__)
+
+# Backend-aware progress label shown in the browser.
+_SEARCH_LABEL = {
+    "rust": "Searching (Rust vector search)",
+    "shadow": "Searching (shadow: pg + Rust)",
+}.get(BACKEND, "Searching (pgvector)")
 
 
 class _Step:
@@ -99,9 +106,9 @@ def search_stream(query: str, n_results: int = 10) -> Iterator[dict]:
             embedding = get_model().encode([query])[0]
             yield step.done()
 
-            step = _Step("search", "Searching Postgres (pgvector)")
+            step = _Step("search", _SEARCH_LABEL)
             yield step.start()
-            rows = _search(get_connection_pool(), embedding, n_results)
+            rows = dispatch_search(_search, get_connection_pool(), embedding, n_results)
             yield step.done()
 
             search_results = rows_to_results(rows)

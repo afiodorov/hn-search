@@ -234,6 +234,62 @@ def generate_embeddings(
     return output_file, df
 
 
+def _search_service():
+    """(url, headers) for the Rust search service from env.
+
+    Uses the ADMIN token: /append and /max_id are admin-only. This token should live
+    only where updates run (your laptop), never on the public web app.
+    """
+    url = os.getenv("HN_SEARCH_URL", "").rstrip("/")
+    if not url:
+        raise RuntimeError("HN_SEARCH_URL must be set for --target rust")
+    token = os.getenv("HN_SEARCH_ADMIN_TOKEN") or os.getenv("HN_SEARCH_TOKEN", "")
+    if not token:
+        raise RuntimeError("HN_SEARCH_ADMIN_TOKEN must be set for --target rust")
+    headers = {"Authorization": f"Bearer {token}"}
+    return url, headers
+
+
+def get_max_id_rust():
+    """Resume point for --target rust: the service's highest ingested hn_id."""
+    import httpx
+
+    url, headers = _search_service()
+    r = httpx.get(f"{url}/max_id", headers=headers, timeout=30)
+    r.raise_for_status()
+    max_id = r.json()["max_id"]
+    print(f"Max ID from rust service: {max_id}")
+    return max_id
+
+
+def append_to_rust(df, batch_size=500):
+    """POST embedded rows to the Rust service /append (dedup is server-side)."""
+    import httpx
+
+    url, headers = _search_service()
+    print(f"\n🔄 Appending {len(df):,} documents to rust service at {url}")
+    total_appended = 0
+    for start in range(0, len(df), batch_size):
+        chunk = df.iloc[start : start + batch_size]
+        rows = [
+            {
+                "hn_id": str(row["id"]),
+                "clean_text": row["clean_text"],
+                "author": str(row["author"]),
+                "timestamp": str(row["timestamp"]),
+                "type": str(row["type"]),
+                "embedding": [float(x) for x in row["embedding"]],
+            }
+            for _, row in chunk.iterrows()
+        ]
+        resp = httpx.post(f"{url}/append", json={"rows": rows}, headers=headers, timeout=120)
+        resp.raise_for_status()
+        j = resp.json()
+        total_appended += j["appended"]
+        print(f"  appended {j['appended']} skipped {j['skipped']} (max_id={j['max_id']})")
+    print(f"✅ Appended {total_appended:,} new rows to rust service")
+
+
 def get_partition_name_for_timestamp(timestamp):
     """Get partition table name for a given timestamp"""
     # Convert timestamp to datetime if it's a string
@@ -391,6 +447,12 @@ def main():
         "--reset", action="store_true", help="Reset state and start fresh"
     )
     parser.add_argument(
+        "--target",
+        choices=["pg", "rust"],
+        default="pg",
+        help="Destination: pg (upsert to Postgres) or rust (/append to the search service)",
+    )
+    parser.add_argument(
         "--project",
         type=str,
         help="GCP project ID for BigQuery billing (defaults to GOOGLE_CLOUD_PROJECT env var or gcloud default)",
@@ -414,14 +476,15 @@ def main():
             print(f"   Embedded file: {state.get('embedded_file', 'None')}")
             print(f"   Upserted IDs: {len(state.get('upserted_ids', []))} documents")
 
-    # Step 1: Find latest non-empty partition
-    latest_partition = find_latest_nonempty_partition()
-    if not latest_partition:
-        print("❌ No partitioned tables found!")
-        return
-
-    # Step 2: Get max ID from that partition
-    max_id = get_max_id_from_partition(latest_partition)
+    # Steps 1-2: Determine the resume point (highest id already ingested).
+    if args.target == "rust":
+        max_id = get_max_id_rust()
+    else:
+        latest_partition = find_latest_nonempty_partition()
+        if not latest_partition:
+            print("❌ No partitioned tables found!")
+            return
+        max_id = get_max_id_from_partition(latest_partition)
     if max_id is None:
         print("❌ Could not determine max ID")
         return
@@ -465,24 +528,28 @@ def main():
             print("❌ No embedded file in state - cannot skip embed")
             return
 
-    # Step 5: Upsert to database
+    # Step 5: Write to the destination (rust /append or pg upsert)
     if not args.skip_upsert:
-        upsert_to_db(df, state=state)
+        if args.target == "rust":
+            append_to_rust(df)
+        else:
+            upsert_to_db(df, state=state)
         state["completed"] = True
         state["completed_at"] = datetime.now().isoformat()
         save_state(state)
     else:
         print("⏭️  Skipping upsert step")
 
-    # Step 6: Attach any new monthly partitions to the parent hn_documents table
-    # so the web path picks them up immediately without a manual make attach.
-    print("\n🔗 Attaching any new partitions to hn_documents parent...")
-    try:
-        from misc.attach_partitions import main as attach_main
+    # Step 6 (pg only): Attach any new monthly partitions to the parent hn_documents
+    # table so the web path picks them up. The rust service needs no attach step.
+    if args.target == "pg":
+        print("\n🔗 Attaching any new partitions to hn_documents parent...")
+        try:
+            from misc.attach_partitions import main as attach_main
 
-        attach_main()
-    except Exception as e:
-        print(f"⚠️  attach_partitions warning (non-fatal): {e}")
+            attach_main()
+        except Exception as e:
+            print(f"⚠️  attach_partitions warning (non-fatal): {e}")
 
     print("\n" + "=" * 80)
     print("✅ All done!")

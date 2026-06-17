@@ -1,0 +1,11 @@
+# Caddy terminates TLS (auto Let's Encrypt) and reverse-proxies to the service.
+# The bearer token (HN_SEARCH_TOKEN) is enforced by the app itself, not here.
+# Replace the hostname and point its DNS A record at this VPS.
+search.example.com {
+	encode zstd gzip
+	# /append batches can be a few MB; allow generous bodies.
+	request_body {
+		max_size 64MB
+	}
+	reverse_proxy 127.0.0.1:8001
+}

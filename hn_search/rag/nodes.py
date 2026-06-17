@@ -14,6 +14,7 @@ from hn_search.cache_config import (
 from hn_search.common import get_model
 from hn_search.db_config import get_db_config
 from hn_search.logging_config import get_logger, log_time
+from hn_search.search_backend import dispatch_search
 
 from .state import RAGState, SearchResult
 
@@ -232,10 +233,11 @@ def retrieve_node(state: RAGState) -> RAGState:
         # Get connection from pool
         pool = get_connection_pool()
 
-        # One query against the partitioned parent: MergeAppend across the per-month
-        # binary indexes builds the shortlist, then exact cosine rerank. Already ordered.
+        # Dispatch to the configured backend (pg | rust | shadow). The pg path is one
+        # query against the partitioned parent (MergeAppend across per-month binary
+        # indexes → shortlist → exact cosine rerank); rust is the standalone service.
         with log_time(logger, "vector search (shortlist + rerank)"):
-            results = _search(pool, query_embedding, n_results)
+            results = dispatch_search(_search, pool, query_embedding, n_results)
 
         with log_time(logger, "building results"):
             search_results = rows_to_results(results)

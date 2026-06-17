@@ -1,0 +1,22 @@
+[Unit]
+Description=hn-search Rust vector search service
+After=network.target
+
+[Service]
+Type=simple
+User=hnsearch
+# Symlink flipped atomically by scripts/rsync_artifacts.sh
+Environment=ARTIFACT_DIR=/var/lib/hnsearch/current
+Environment=PORT=8001
+Environment=HN_SHORTLIST=200
+# HN_SEARCH_TOKEN (and any overrides) live here, not in the unit:
+EnvironmentFile=/etc/hnsearch.env
+ExecStart=/usr/local/bin/rust-search
+Restart=always
+RestartSec=2
+# mmap + warm large files; raise locked-memory and fd ceilings.
+LimitMEMLOCK=infinity
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -23,6 +23,7 @@ dependencies = [
     "psycopg[binary,pool]>=3.0",
     "pgvector",
     "redis>=6.4.0",
+    "httpx>=0.27",
 ]
 
 # NOTE: torch is intentionally unpinned to any index. It is dev-only (serve uses
