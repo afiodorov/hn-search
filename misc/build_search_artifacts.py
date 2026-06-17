@@ -1,27 +1,26 @@
 #!/usr/bin/env python
-"""Build the flat artifact files for the Rust brute-force search service.
+"""Build the flat artifact files for the Rust brute-force search service from the
+embedded parquet shards (data/embedded/*.parquet, produced by
+misc/generate_embeddings_gpu.py). For a full rebuild from scratch.
 
-Streams ``hn_documents`` from the live Postgres (the one-time bootstrap source) and
-writes four **row-aligned** files into the output dir (row ``i`` is the same comment
+Writes four **row-aligned** files into the output dir (row ``i`` is the same comment
 in all of them):
 
   codes.bin       N x 96 bytes    sign-bit binary quantization. bit i = 1 iff
                                   embedding[i] > 0, packed MSB-first (np.packbits,
-                                  bitorder='big'), matching pgvector binary_quantize.
+                                  bitorder='big').
   rerank_f16.bin  N x 768 x 2 B   little-endian IEEE-754 half of each embedding.
   docs.sqlite     doc(rowid INTEGER PRIMARY KEY, hn_id, clean_text, author,
                                   timestamp, type); rowid = .bin row index + 1.
   meta.json       {count, dim, code_bytes, built_at, source}
 
-Rows are streamed ``ORDER BY id::bigint``, so the build is **resumable and
-idempotent**: on restart it reconciles the three files to a consistent row count and
-continues from ``id > last_written_id``. Re-running a finished build is a no-op.
+Resumable and idempotent: on restart it reconciles the three files to a consistent
+row count and continues. (Daily growth goes through the service's /append, not here.)
 
 Usage:
-    uv run python misc/build_search_artifacts.py --out artifacts/        # full dump
+    uv run python misc/build_search_artifacts.py --out artifacts/
     uv run python misc/build_search_artifacts.py --out artifacts/ --limit 1000
     uv run python misc/build_search_artifacts.py --out artifacts/ --restart   # fresh
-    uv run python misc/build_search_artifacts.py --source parquet --glob 'data/embedded/*.parquet'
 """
 
 import argparse
@@ -40,9 +39,7 @@ F16_BYTES = DIM * 2  # 1536
 
 
 def to_vec(emb) -> np.ndarray:
-    """Coerce a pgvector Vector/HalfVector (or list) to a float32 ndarray."""
-    if hasattr(emb, "to_numpy"):
-        return emb.to_numpy().astype(np.float32, copy=False)
+    """Coerce a parquet embedding cell (list/ndarray) to a float32 ndarray."""
     return np.asarray(emb, dtype=np.float32)
 
 
@@ -155,11 +152,6 @@ class Progress:
         self.start = time.time()
         self.start_done = done
         self.last = 0.0
-        self.retries = 0  # consecutive reconnect attempts since last committed batch
-
-    def ok(self):
-        """Real progress was committed — reset the reconnect budget."""
-        self.retries = 0
 
     def update(self, done: int):
         now = time.time()
@@ -174,95 +166,6 @@ class Progress:
             eta = (self.total - done) / rate if rate > 0 else 0
             msg += f" | {pct:.1f}% | ETA {eta/60:.0f}m"
         print(msg, file=sys.stderr, flush=True)
-
-
-def _stream_once(writer, conn, total, batch, limit, progress) -> int:
-    """Stream rows from a fresh connection, resuming from writer.last_id. Returns
-    rows skipped (NULL embedding). Resets the caller's retry counter via progress."""
-    # ORDER BY id (text) streams via Merge Append over the per-partition PK indexes —
-    # no global Sort, so nothing spills to the server's pgsql_tmp. (ORDER BY id::bigint
-    # can't use the text index → full 18 GB sort → server DiskFull / hang.) Order is
-    # purely positional for the artifact; resume is a text-id keyset.
-    params: list = []
-    where = ""
-    if writer.last_id is not None:
-        where = "WHERE id > %s"
-        params.append(writer.last_id)
-    sql = (
-        f"SELECT id, clean_text, author, timestamp, type, embedding "
-        f"FROM hn_documents {where} ORDER BY id"
-    )
-    if limit:
-        sql += f" LIMIT {int(limit - writer.count)}"
-
-    skipped = 0
-    with conn.cursor(name="artifact_dump") as cur:
-        cur.itersize = batch
-        cur.execute(sql, params)
-        rows, vecs = [], []
-        for hn_id, clean_text, author, ts, typ, emb in cur:
-            if emb is None:
-                skipped += 1
-                continue
-            rows.append((str(hn_id), clean_text, author, str(ts), typ))
-            vecs.append(to_vec(emb))
-            if len(rows) >= batch:
-                writer.write_batch(rows, np.vstack(vecs))
-                rows, vecs = [], []
-                progress.update(writer.count)
-                progress.ok()  # committed progress → reset retry budget
-        if rows:
-            writer.write_batch(rows, np.vstack(vecs))
-            progress.update(writer.count)
-    return skipped
-
-
-def dump_pg(writer: ArtifactWriter, limit: int | None, batch: int, max_retries: int = 8):
-    import time
-
-    import psycopg
-    from pgvector.psycopg import register_vector
-
-    from hn_search.db_config import get_db_config
-
-    with psycopg.connect(**get_db_config()) as c0:
-        total = c0.execute("SELECT COUNT(*) FROM hn_documents").fetchone()[0]
-    if limit:
-        total = min(total, limit)
-    print(f"target: {total:,} rows (have {writer.count:,})", file=sys.stderr)
-    if writer.count >= total:
-        print("✓ already complete", file=sys.stderr)
-        return
-    progress = Progress(total, writer.count)
-
-    # Auto-reconnect: a dropped connection just resumes from writer.last_id (which
-    # advances per committed batch). The retry budget resets whenever real progress is
-    # made, so transient blips over a long dump don't accumulate toward the cap.
-    skipped = 0
-    while writer.count < total:
-        try:
-            conn = psycopg.connect(**get_db_config())
-            register_vector(conn)
-            try:
-                skipped += _stream_once(writer, conn, total, batch, limit, progress)
-            finally:
-                conn.close()
-            break  # cursor drained without error → done
-        except (psycopg.OperationalError, psycopg.errors.AdminShutdown) as e:
-            progress.retries += 1
-            if progress.retries > max_retries:
-                print(f"✗ giving up after {max_retries} reconnects; re-run to resume", file=sys.stderr)
-                raise
-            wait = min(30, 2**progress.retries)
-            print(
-                f"⚠️  connection lost at {writer.count:,} rows ({type(e).__name__}); "
-                f"reconnecting in {wait}s (attempt {progress.retries}/{max_retries})",
-                file=sys.stderr,
-                flush=True,
-            )
-            time.sleep(wait)
-    if skipped:
-        print(f"⚠️  skipped {skipped} rows with NULL embedding", file=sys.stderr)
 
 
 def dump_parquet(writer: ArtifactWriter, glob: str, limit: int | None, batch: int):
@@ -297,28 +200,20 @@ def dump_parquet(writer: ArtifactWriter, glob: str, limit: int | None, batch: in
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="artifacts", type=Path)
-    ap.add_argument("--source", choices=["pg", "parquet"], default="pg")
     ap.add_argument("--glob", default="data/embedded/*.parquet")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--batch", type=int, default=20000)
     ap.add_argument("--restart", action="store_true", help="Delete existing artifacts and start fresh")
     args = ap.parse_args()
 
-    from dotenv import load_dotenv
-
-    load_dotenv()
-
     if args.restart:
         for name in ("codes.bin", "rerank_f16.bin", "docs.sqlite", "meta.json"):
             (args.out / name).unlink(missing_ok=True)
 
-    print(f"Building artifacts → {args.out} (source={args.source})", file=sys.stderr)
+    print(f"Building artifacts → {args.out} from {args.glob}", file=sys.stderr)
     writer = ArtifactWriter(args.out)
-    if args.source == "pg":
-        dump_pg(writer, args.limit, args.batch)
-    else:
-        dump_parquet(writer, args.glob, args.limit, args.batch)
-    meta = writer.finish(args.source)
+    dump_parquet(writer, args.glob, args.limit, args.batch)
+    meta = writer.finish("parquet")
     print(f"✅ wrote {meta['count']:,} rows to {args.out}/", file=sys.stderr)
     print(json.dumps(meta, indent=2))
 

@@ -1,6 +1,7 @@
 """Centralized logging configuration for HN Search."""
 
 import logging
+import os
 import sys
 import time
 from contextlib import contextmanager
@@ -48,7 +49,5 @@ def log_time(logger: logging.Logger, operation: str, level: str = "INFO"):
 
 
 # Initialize logging on import
-import os
-
 log_level = os.environ.get("LOG_LEVEL", "INFO")
 setup_logging(log_level)

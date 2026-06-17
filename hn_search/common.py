@@ -7,7 +7,7 @@ misc/generate_embeddings_gpu.py). At serve time we only need to embed the user's
   * ~300-450 MB resident instead of ~1.5 GB for torch + the model
   * sub-second cold start, no torch dependency tree
   * verified bit-exact (cosine 1.0) against sentence-transformers and against the
-    stored corpus embeddings, so queries align with the pgvector index
+    stored corpus embeddings, so queries align with the indexed vectors
 
 The ONNX weights and tokenizer are pulled from the model's Hugging Face repo
 (which ships pre-exported ONNX), cached under HF_HOME. Pick the weight file via

@@ -1,4 +1,4 @@
-.PHONY: format lint clean fetch embed load index attach rebuild
+.PHONY: format lint clean fetch embed artifacts rebuild
 
 # Default target - run both formatting and linting
 format:
@@ -22,27 +22,21 @@ clean:
 	docker compose down -v
 
 # ---- Full rebuild pipeline (see README "Full Rebuild From Scratch") ----
+# Daily growth goes through the service's /append; this is only for a from-scratch
+# rebuild of the artifact files.
 # 1. Fetch HN comments from BigQuery, one parquet per month (runs anywhere).
 fetch:
 	uv run --extra dev python misc/fetch_historical.py
 
-# 2. Embed the monthly shards. Runs on THIS machine's GPU — so run it ON the GPU box.
-#    To drive a remote box from your laptop instead, use: ./misc/gpu_embed.sh
+# 2. Embed the monthly shards → data/embedded/*.parquet. Runs on THIS machine's GPU,
+#    so run it ON the GPU box. To drive a remote box instead, use: ./misc/gpu_embed.sh
 embed:
 	uv run --extra dev python misc/generate_embeddings_gpu.py
 
-# 3. Load embedded months into hn_documents_YYYY_MM partitions (+ binary index).
-load:
-	uv run python misc/load_embedded_to_partitions.py
+# 3. Build the flat artifact files from the embedded parquet, then rsync them to the
+#    box (rust-search/scripts/rsync_artifacts.sh).
+artifacts:
+	uv run python misc/build_search_artifacts.py --out rust-search/artifacts
 
-# (Re)build / upgrade the binary HNSW index on all partitions.
-index:
-	uv run python misc/build_binary_index.py
-
-# Attach monthly tables under the partitioned parent `hn_documents` so the web path
-# queries them in one MergeAppend. Idempotent; re-run after new months are added.
-attach:
-	uv run python misc/attach_partitions.py
-
-# Embed + load + attach (run after `make fetch`); embed needs a GPU.
-rebuild: embed load attach
+# Embed + build artifacts (run after `make fetch`); embed needs a GPU.
+rebuild: embed artifacts

@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 """Fetch HN comments from BigQuery, one parquet per month.
 
-Each output file ``data/raw/month_YYYY_MM.parquet`` maps 1:1 to a
-``hn_documents_YYYY_MM`` partition, so fetch -> embed -> load all stay aligned.
-Resumable: existing month files are skipped. Torch-free, so it runs anywhere
-(locally or on the GPU box).
+Writes ``data/raw/month_YYYY_MM.parquet`` shards (step 1 of the full rebuild:
+fetch -> embed -> build artifacts). Resumable: existing month files are skipped.
+Torch-free, so it runs anywhere (locally or on the GPU box).
 
 Usage:
     uv run --extra dev python misc/fetch_historical.py                 # 2023-01 .. current month

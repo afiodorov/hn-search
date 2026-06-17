@@ -9,11 +9,9 @@ Verifies the invariants that guarantee no partial / misaligned data:
   3. code↔vector alignment — for random rows, re-quantizing the stored f16 vector
      reproduces the stored 96-byte code, proving row i is the same comment in both
      files (catches any cross-file drift).
-  4. (optional) --check-pg — N and a few rows match the live Postgres.
 
 Usage:
     uv run python misc/verify_artifacts.py --artifacts rust-search/artifacts
-    uv run python misc/verify_artifacts.py --artifacts rust-search/artifacts --check-pg
 """
 
 import argparse
@@ -38,7 +36,6 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--artifacts", type=Path, default=Path("rust-search/artifacts"))
     ap.add_argument("--samples", type=int, default=2000, help="random rows for alignment check")
-    ap.add_argument("--check-pg", action="store_true")
     args = ap.parse_args()
 
     a = args.artifacts
@@ -95,28 +92,6 @@ def main():
         meta = json.loads(meta_path.read_text())
         status = "matches" if meta["count"] == n else f"STALE (meta={meta['count']:,}, build still running)"
         print(f"meta.json count: {meta['count']:,} — {status}")
-
-    if args.check_pg:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-        import psycopg
-
-        from hn_search.db_config import get_db_config
-
-        pg = psycopg.connect(**get_db_config())
-        pg_n = pg.execute("SELECT COUNT(*) FROM hn_documents").fetchone()[0]
-        print(f"pg hn_documents: {pg_n:,} rows ({'complete' if pg_n == n else f'{n/pg_n:.1%} dumped'})")
-        # spot-check a few hn_ids exist in pg with matching text
-        sample = conn.execute("SELECT hn_id, clean_text FROM doc ORDER BY RANDOM() LIMIT 5").fetchall()
-        mism = 0
-        for hn_id, text in sample:
-            row = pg.execute("SELECT clean_text FROM hn_documents WHERE id = %s", (hn_id,)).fetchone()
-            if row is None or row[0] != text:
-                mism += 1
-        print(f"✓ {len(sample) - mism}/{len(sample)} sampled rows match pg text" if not mism
-              else f"❌ {mism}/{len(sample)} sampled rows differ from pg")
-        pg.close()
 
     conn.close()
     print("\n✅ artifacts integrity OK")
