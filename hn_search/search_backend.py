@@ -28,18 +28,32 @@ def _to_list(embedding) -> list[float]:
     return embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
 
 
+# Persistent keep-alive client: reuse one TCP+TLS connection across queries so the
+# handshake (costly over the cross-datacenter hop) is paid once, not per request.
+_client = None
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        import httpx
+
+        headers = {"Authorization": f"Bearer {RUST_TOKEN}"} if RUST_TOKEN else {}
+        _client = httpx.Client(
+            base_url=RUST_URL,
+            headers=headers,
+            timeout=RUST_TIMEOUT,
+            limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=60),
+        )
+    return _client
+
+
 def search_rust(query_embedding, n_results: int) -> list[tuple]:
     """POST the query vector to the Rust service; return pg-shaped rows."""
-    import httpx
-
     if not RUST_URL:
         raise RuntimeError("HN_SEARCH_URL is not set for the rust search backend")
-    headers = {"Authorization": f"Bearer {RUST_TOKEN}"} if RUST_TOKEN else {}
-    resp = httpx.post(
-        f"{RUST_URL}/search",
-        json={"embedding": _to_list(query_embedding), "k": n_results},
-        headers=headers,
-        timeout=RUST_TIMEOUT,
+    resp = _get_client().post(
+        "/search", json={"embedding": _to_list(query_embedding), "k": n_results}
     )
     resp.raise_for_status()
     return [
