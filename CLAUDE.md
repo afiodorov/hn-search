@@ -83,7 +83,7 @@ from BigQuery. Only flip a release built from a complete, up-to-date dump.
 
 ## Updating the corpus
 
-**Daily incremental** (run where the admin token lives — laptop):
+**Daily incremental** — automated on the VPS via Airflow (also runnable by hand):
 ```sh
 uv run --extra dev python misc/fetch_and_embed_new_comments.py
 ```
@@ -91,6 +91,19 @@ Reads the service's `/max_id` → pulls newer comments from BigQuery → embeds 
 (ONNX) → POSTs to `/append`. Flags: `--skip-fetch`, `--skip-embed`, `--skip-append`,
 `--reset`. It checkpoints to `data/raw/fetch_state.json` and reuses existing
 raw/embedded parquet files, so a re-run after a failure resumes cheaply.
+
+**Automation (Airflow on the VPS).** A systemd `airflow.service` (`airflow standalone`,
+Airflow 3.x in `/root/airflow-venv`, `AIRFLOW_HOME=/root/airflow`) runs the DAG
+`hn_incremental_update` daily at `0 6 * * *` UTC — one `BashOperator`:
+`cd /root/hn-search && /root/.local/bin/uv run --extra dev python
+misc/fetch_and_embed_new_comments.py --reset`. The box has its own non-git rsync copy
+of the repo at `/root/hn-search` (env in `.env` there: `HN_SEARCH_URL=http://127.0.0.1:8001`,
+admin token, `GOOGLE_CLOUD_PROJECT`, and ADC copied to `/root/.config/gcloud/`). **Code
+changes to the updater don't propagate automatically — re-rsync `./` to
+`/root/hn-search/` to update it.** UI: `https://167.233.115.172.sslip.io:8443`
+(Caddy block → 127.0.0.1:8080, ufw allows 8443), behind Caddy basic-auth **and** the
+Airflow login (SimpleAuthManager admin password in
+`/root/airflow/simple_auth_manager_passwords.json.generated`).
 
 **Full rebuild** (rare): `make fetch` → `make embed` (on a GPU box) → `make artifacts`
 → `rsync_artifacts.sh`. See README.
