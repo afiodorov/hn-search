@@ -158,7 +158,10 @@ def generate_embeddings(parquet_file, state=None) -> Tuple[Optional[Path], Optio
     print(f"Processing {len(df):,} documents with ONNX encoder...")
     model = get_model()
     documents = df["clean_text"].tolist()
-    batch_size = 64
+    # ONNX attention/FFN activations scale with batch_size * MAX_SEQ_LENGTH; on the
+    # memory-capped Hetzner box (LocalExecutor runs this inside airflow.service's
+    # cgroup) a large batch spikes RAM and thrashes swap. 16 keeps peak ~hundreds of MB.
+    batch_size = int(os.getenv("HN_EMBED_BATCH_SIZE", "16"))
     all_embeddings = []
     temp_output = output_file.with_suffix(".parquet.tmp")
     for start in range(0, len(documents), batch_size):
