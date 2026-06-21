@@ -212,6 +212,32 @@ def append_to_rust(df, batch_size=1000):
     print(f"✅ Appended {total_appended:,} new rows to rust service")
 
 
+def cleanup_artifacts(data_dir="data/raw"):
+    """Delete consumed fetch/embed parquet artifacts after a successful append.
+
+    Each daily run leaves a ~60 MB ``*_embedded.parquet`` (plus the small raw fetch and
+    any ``.parquet.tmp`` checkpoint); once those rows are in the Rust service the files
+    are dead weight and were accumulating until the box ran low on disk. Call this ONLY
+    after ``append_to_rust`` succeeds — a failed run must keep its files so a retry can
+    resume cheaply by filename (see ``fetch_from_bigquery`` / ``generate_embeddings``).
+    ``fetch_state.json`` is intentionally left in place.
+    """
+    d = Path(data_dir)
+    stale = list(d.glob("new_comments_from_*.parquet")) + list(
+        d.glob("new_comments_from_*.parquet.tmp")
+    )
+    removed, freed = 0, 0
+    for f in stale:
+        try:
+            freed += f.stat().st_size
+            f.unlink()
+            removed += 1
+        except OSError as e:
+            print(f"  ⚠️  could not remove {f}: {e}")
+    if removed:
+        print(f"🧹 Cleaned {removed} artifact file(s), freed {freed / 1e6:.1f} MB")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch, embed, and append new HN comments")
     parser.add_argument("--skip-fetch", action="store_true")
@@ -259,6 +285,7 @@ def main():
         append_to_rust(df)
         state["completed_at"] = datetime.now().isoformat()
         save_state(state)
+        cleanup_artifacts()
 
     print("\n✅ Done.")
 
