@@ -90,6 +90,15 @@ def fetch_from_bigquery(min_id, output_dir="data/raw", state=None, project=None)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    # Reuse is keyed on min_id, which the filename encodes — a retry (even with
+    # --reset, which wipes the state file) skips the BigQuery re-scan, while a run
+    # whose min_id has advanced past an appended chunk correctly fetches fresh.
+    # The write below is rename-atomic, so an existing final file is always complete.
+    filepath = output_path / f"new_comments_from_{min_id}.parquet"
+    if filepath.exists():
+        print(f"✅ Found existing raw file: {filepath}")
+        return filepath
+
     if state and state.get("raw_file"):
         raw_file = Path(state["raw_file"])
         if raw_file.exists():
@@ -131,12 +140,48 @@ def fetch_from_bigquery(min_id, output_dir="data/raw", state=None, project=None)
         print("No new comments to process")
         return None
 
-    filepath = output_path / f"new_comments_from_{min_id}.parquet"
     temp_filepath = filepath.with_suffix(".parquet.tmp")
     df.to_parquet(temp_filepath, index=False)
     temp_filepath.rename(filepath)
     print(f"💾 Saved to {filepath}")
     return filepath
+
+
+def embed_and_append(parquet_file, chunk_size=1000) -> int:
+    """Embed and append in chunks, so a crash/timeout only loses one chunk's work.
+
+    Each chunk is embedded then immediately POSTed to /append, which advances the
+    service's max_id. A retry after a failure calls get_max_id_rust() and re-fetches
+    from that new high-water mark, so at most `chunk_size` rows of embedding are ever
+    redone instead of the whole backlog.
+    """
+    print(f"\n🔄 Loading {parquet_file}")
+    df = pd.read_parquet(parquet_file)
+    df = df[df["text"].notna() & (df["text"] != "")]
+    df["clean_text"] = df["text"].astype(str).apply(strip_html)
+    df = df[df["clean_text"].str.len() > 0]
+    total = len(df)
+    if total == 0:
+        print("No valid documents after cleaning")
+        return 0
+
+    print(f"Processing {total:,} documents with ONNX encoder, {chunk_size}-row chunks...")
+    model = get_model()
+    # ONNX attention/FFN activations scale with batch_size * MAX_SEQ_LENGTH; on the
+    # memory-capped Hetzner box (LocalExecutor runs this inside airflow.service's
+    # cgroup) a large batch spikes RAM and thrashes swap. 16 keeps peak ~hundreds of MB.
+    embed_batch_size = int(os.getenv("HN_EMBED_BATCH_SIZE", "16"))
+    total_appended = 0
+    for start in range(0, total, chunk_size):
+        chunk = df.iloc[start : start + chunk_size].copy()
+        documents = chunk["clean_text"].tolist()
+        embeddings = []
+        for b in range(0, len(documents), embed_batch_size):
+            embeddings.extend(model.encode(documents[b : b + embed_batch_size]))
+        chunk["embedding"] = [e.tolist() for e in embeddings]
+        total_appended += append_to_rust(chunk, batch_size=chunk_size)
+        print(f"  💾 {min(start + chunk_size, total)}/{total} embedded+appended")
+    return total_appended
 
 
 def generate_embeddings(parquet_file, state=None) -> Tuple[Optional[Path], Optional[pd.DataFrame]]:
@@ -179,7 +224,7 @@ def generate_embeddings(parquet_file, state=None) -> Tuple[Optional[Path], Optio
     return output_file, df
 
 
-def append_to_rust(df, batch_size=1000):
+def append_to_rust(df, batch_size=1000) -> int:
     """POST embedded rows to the Rust service /append (dedup is server-side).
 
     Each row carries a 768-d f32 embedding (~10 KB of JSON), so a batch of 1000 is
@@ -210,6 +255,7 @@ def append_to_rust(df, batch_size=1000):
         total_appended += j["appended"]
         print(f"  appended {j['appended']} skipped {j['skipped']} (max_id={j['max_id']})")
     print(f"✅ Appended {total_appended:,} new rows to rust service")
+    return total_appended
 
 
 def cleanup_artifacts(data_dir="data/raw"):
@@ -267,6 +313,18 @@ def main():
         parquet_file = Path(state["raw_file"])
     else:
         print("❌ No raw file in state - cannot skip fetch")
+        return
+
+    if not args.skip_embed and not args.skip_append:
+        # Normal path: embed+append in chunks so a mid-run failure only costs one
+        # chunk of re-embedding, not the whole backlog (state comes from the
+        # service's max_id, not a local checkpoint file).
+        chunk_size = int(os.getenv("HN_APPEND_CHUNK_SIZE", "1000"))
+        embed_and_append(parquet_file, chunk_size=chunk_size)
+        state["completed_at"] = datetime.now().isoformat()
+        save_state(state)
+        cleanup_artifacts()
+        print("\n✅ Done.")
         return
 
     df = None
