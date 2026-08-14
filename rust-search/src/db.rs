@@ -16,6 +16,9 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // Idempotent: cheap no-op if already present. Lets a direct hn_id lookup
+    // (POST /similar) avoid a full table scan without a separate migration step.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_hn_id ON doc(hn_id)", [])?;
     Ok(conn)
 }
 
@@ -48,6 +51,30 @@ pub fn fetch(conn: &Connection, logical: usize) -> Result<Option<Doc>> {
                 timestamp: r.get(3)?,
                 doc_type: r.get(4)?,
             })
+        })
+        .ok();
+    Ok(row)
+}
+
+/// Fetch one doc (with its logical row index) by hn_id — for direct link/id
+/// lookup and "more like this" (POST /similar), neither of which know the rowid.
+pub fn fetch_by_hn_id(conn: &Connection, hn_id: &str) -> Result<Option<(usize, Doc)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT rowid, hn_id, clean_text, author, timestamp, type FROM doc WHERE hn_id = ?1",
+    )?;
+    let row = stmt
+        .query_row([hn_id], |r| {
+            let rowid: i64 = r.get(0)?;
+            Ok((
+                (rowid - 1) as usize,
+                Doc {
+                    hn_id: r.get(1)?,
+                    clean_text: r.get(2)?,
+                    author: r.get(3)?,
+                    timestamp: r.get(4)?,
+                    doc_type: r.get(5)?,
+                },
+            ))
         })
         .ok();
     Ok(row)

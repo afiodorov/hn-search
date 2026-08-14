@@ -179,6 +179,18 @@ fn scan_base(base: &Base, qcode: &[u8], shortlist: usize) -> BinaryHeap<(u32, us
         })
 }
 
+/// Read and decode the stored vector for a logical row index (base or tail).
+/// Lets POST /similar reuse a document's own already-computed embedding as a
+/// query vector — no reembedding, just the same bytes rerank already reads.
+pub fn get_vector(base: &Base, tail: &Tail, idx: usize) -> Vec<f32> {
+    let bytes = if idx < base.count {
+        base.f16(idx)
+    } else {
+        tail.f16(idx - base.count)
+    };
+    decode_f16(bytes)
+}
+
 /// Two-stage search → `(logical_index, cosine_distance)` ascending, top-`k`.
 pub fn search(base: &Base, tail: &Tail, query: &[f32], shortlist: usize, k: usize) -> Vec<(usize, f32)> {
     let qcode = quantize(query);

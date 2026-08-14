@@ -4,7 +4,8 @@
 //! Endpoints (all but /health require `Authorization: Bearer $HN_SEARCH_TOKEN` when
 //! the token env is set):
 //!   GET  /health  -> "ok"
-//!   POST /search  {embedding:[f32;768], k?, shortlist?} -> [SearchHit]
+//!   POST /search  {embedding:[f32;768], k?, shortlist?, time_after?, time_before?} -> [SearchHit]
+//!   POST /similar {hn_id, k?} -> [SearchHit]  (reuses the doc's own stored vector)
 //!   POST /append  {rows:[{hn_id, clean_text, author, timestamp, type, embedding}]}
 //!   GET  /max_id  -> {max_id}
 
@@ -42,6 +43,19 @@ struct SearchReq {
     embedding: Vec<f32>,
     k: Option<usize>,
     shortlist: Option<usize>,
+    /// Inclusive ISO8601 bounds on `timestamp` (string-compared — valid since the
+    /// stored format is zero-padded ISO8601 with the date first). Filtering
+    /// happens after the usual Hamming shortlist + cosine rerank, so when either
+    /// bound is set we ask index::search for more candidates than `k` up front
+    /// to leave enough survivors after the filter.
+    time_after: Option<String>,
+    time_before: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SimilarReq {
+    hn_id: String,
+    k: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -148,16 +162,35 @@ async fn search(
         ));
     }
     let k = req.k.unwrap_or(10);
-    let shortlist = req.shortlist.unwrap_or(state.shortlist).max(k);
+    let has_time_filter = req.time_after.is_some() || req.time_before.is_some();
+    // Filtering happens after rerank truncates to fetch_k, so over-fetch when a
+    // time bound is set to leave enough survivors; plain searches are unaffected.
+    let fetch_k = if has_time_filter { k * 5 } else { k };
+    let shortlist = req.shortlist.unwrap_or(state.shortlist).max(fetch_k);
+    let time_after = req.time_after.clone();
+    let time_before = req.time_before.clone();
 
     let hits = tokio::task::spawn_blocking(move || -> Result<Vec<SearchHit>, String> {
         let tail = state.tail.read().unwrap();
-        let scored = index::search(&state.base, &tail, &req.embedding, shortlist, k);
+        let scored = index::search(&state.base, &tail, &req.embedding, shortlist, fetch_k);
         drop(tail);
         let conn = state.db.lock().unwrap();
-        let mut out = Vec::with_capacity(scored.len());
+        let mut out = Vec::with_capacity(k);
         for (idx, dist) in scored {
+            if out.len() == k {
+                break;
+            }
             if let Some(d) = db::fetch(&conn, idx).map_err(|e| e.to_string())? {
+                if let Some(after) = &time_after {
+                    if &d.timestamp < after {
+                        continue;
+                    }
+                }
+                if let Some(before) = &time_before {
+                    if &d.timestamp > before {
+                        continue;
+                    }
+                }
                 out.push(SearchHit {
                     id: d.hn_id,
                     clean_text: d.clean_text,
@@ -175,6 +208,62 @@ async fn search(
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(hits))
+}
+
+async fn similar(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SimilarReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_read(&state, &headers)?;
+    let k = req.k.unwrap_or(10);
+
+    let hits = tokio::task::spawn_blocking(move || -> Result<Option<Vec<SearchHit>>, String> {
+        let conn = state.db.lock().unwrap();
+        let found = db::fetch_by_hn_id(&conn, &req.hn_id).map_err(|e| e.to_string())?;
+        let Some((source_idx, _)) = found else {
+            return Ok(None);
+        };
+        drop(conn);
+
+        let tail = state.tail.read().unwrap();
+        let query = index::get_vector(&state.base, &tail, source_idx);
+        // +1 candidate to absorb the source document itself, which will always
+        // be its own nearest neighbor at distance ~0.
+        let shortlist = state.shortlist.max(k + 1);
+        let scored = index::search(&state.base, &tail, &query, shortlist, k + 1);
+        drop(tail);
+
+        let conn = state.db.lock().unwrap();
+        let mut out = Vec::with_capacity(k);
+        for (idx, dist) in scored {
+            if out.len() == k {
+                break;
+            }
+            if idx == source_idx {
+                continue;
+            }
+            if let Some(d) = db::fetch(&conn, idx).map_err(|e| e.to_string())? {
+                out.push(SearchHit {
+                    id: d.hn_id,
+                    clean_text: d.clean_text,
+                    author: d.author,
+                    timestamp: d.timestamp,
+                    doc_type: d.doc_type,
+                    distance: dist,
+                });
+            }
+        }
+        Ok(Some(out))
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    match hits {
+        Some(hits) => Ok(Json(hits)),
+        None => Err(err(StatusCode::NOT_FOUND, "hn_id not found")),
+    }
 }
 
 async fn append(
@@ -289,6 +378,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/search", post(search))
+        .route("/similar", post(similar))
         // axum defaults request bodies to 2MB; /append batches are several MB of
         // JSON embeddings, so lift the cap to match Caddy's 64MB.
         .route(
