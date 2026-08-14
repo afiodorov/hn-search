@@ -31,23 +31,29 @@ from hn_search.rag.pipeline import search_stream, search_stream_agentic
 
 _ENGINES = {"legacy": search_stream, "agentic": search_stream_agentic}
 
-JUDGE_PROMPT = """You are grading whether two answers to the same question are \
-substantively equivalent, for regression-testing a Hacker News search/RAG system \
-after a code change.
+JUDGE_PROMPT = """You are grading whether a new answer to a question is still a \
+good answer, for regression-testing a Hacker News search/RAG system that is \
+actively being changed (new retrieval tools, rewritten/combined searches, etc.).
+The system is EXPECTED to retrieve a different set of HN comments over time as it
+improves — a different specific book/blog/resource being cited than before is
+normal and NOT a regression on its own.
 
 Question: {query}
 
-Answer A (baseline, from before the change):
+Answer A (baseline, an earlier accepted-good answer):
 {baseline_answer}
 
-Answer B (new, from after the change):
+Answer B (new):
 {new_answer}
 
-Wording, phrasing, ordering, and formatting differences are expected and FINE — \
-do not flag those. Flag only if the SUBSTANCE materially changed: different \
-recommendations/conclusions, a key point present in A but missing from B, citing \
-different or contradictory sources for the same claim, or an apparent \
-hallucination in B that wasn't in A.
+Wording, phrasing, ordering, formatting, and WHICH specific items/sources are \
+cited are all expected to vary and are FINE — do not flag those, even if several \
+recommendations differ. Flag ONLY if Answer B has an actual quality problem on \
+its own merits: it doesn't address the question, contradicts itself, shows signs \
+of hallucination (a claim/quote not plausibly grounded in real HN comments), is \
+clearly lower quality or less useful than A (e.g. much thinner, generic, or \
+off-topic), or is otherwise something you'd flag as broken if you saw it in \
+isolation without needing A at all.
 
 Respond with strict JSON and nothing else:
 {{"verdict": "PASS" or "FLAG", "reasoning": "<one or two sentences>"}}"""

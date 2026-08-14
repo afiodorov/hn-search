@@ -99,7 +99,7 @@ Example response format:
 The community has mixed views on this topic. As user john_doe explains, "Python is great for prototyping" [[1]](https://news.ycombinator.com/item?id=12345). Meanwhile, user jane_smith argues that performance can be an issue [[2]](https://news.ycombinator.com/item?id=67890)."""
 
 
-def make_llm() -> ChatOpenAI:
+def make_llm(temperature: float = 0.7) -> ChatOpenAI:
     # cache=False: opt out of any global LangChain LLM cache (unreliable with
     # .stream()); the explicit get_cached_answer/cache_answer functions are
     # the real answer cache.
@@ -107,7 +107,7 @@ def make_llm() -> ChatOpenAI:
         model="deepseek-v4-flash",
         api_key=os.getenv("DEEPSEEK_API_KEY"),
         base_url="https://api.deepseek.com",
-        temperature=0.7,
+        temperature=temperature,
         cache=False,
     )
 

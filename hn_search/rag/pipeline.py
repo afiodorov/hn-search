@@ -149,15 +149,15 @@ def search_stream(query: str, n_results: int = 10) -> Iterator[dict]:
 
 _NODE_LABELS = {
     "agent": "Planning search",
-    "tools": _SEARCH_LABEL,
-    "extract_sources": "Collecting sources",
+    "tools": "Searching (agent-requested)",
+    "gather_sources": "Searching (baseline) + merging",
     "synthesize_answer": "Asking DeepSeek",
 }
 
 
 def search_stream_agentic(query: str) -> Iterator[dict]:
-    """Stage-1 agentic pipeline: drives the compiled tool-calling graph, translating
-    its per-node updates into the same SSE event contract as search_stream()."""
+    """Agentic pipeline: drives the compiled tool-calling graph, translating its
+    per-node updates into the same SSE event contract as search_stream()."""
     workflow = create_agent_workflow()
     initial_state = {"messages": [], "query": query, "sources": [], "answer": ""}
 
@@ -178,7 +178,7 @@ def search_stream_agentic(query: str) -> Iterator[dict]:
                     "hit": None,
                 }
 
-                if node_name == "extract_sources":
+                if node_name == "gather_sources":
                     sources = delta.get("sources", [])
                     logger.info(f"✅ Found {len(sources)} relevant comments/articles")
                     yield {
