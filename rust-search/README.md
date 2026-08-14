@@ -26,9 +26,13 @@ the service folds them into the base on rebuild.
 `Authorization: Bearer $HN_SEARCH_TOKEN` required for all but `/health`.
 
 - `GET  /health` → `ok`
-- `POST /search` `{embedding:[f32;768], k?, shortlist?}` → `[{id, clean_text, author, timestamp, type, distance}]` (asc distance)
+- `POST /search` `{embedding:[f32;768], k?, shortlist?, time_after?, time_before?}` → `[{id, clean_text, author, timestamp, type, distance}]` (asc distance). `time_after`/`time_before` (ISO8601, string-compared) optionally filter by `timestamp`; omitting both is identical to a plain search. Filtering happens after rerank, so the shortlist is over-fetched (5×) internally when either bound is set to leave enough survivors.
+- `POST /similar` `{hn_id, k?}` → `[{id, clean_text, author, timestamp, type, distance}]` — looks up `hn_id`, reuses its already-stored embedding as the query (no reembedding), and returns related comments excluding the source itself. 404 if `hn_id` isn't found.
 - `POST /append` `{rows:[{hn_id, clean_text, author, timestamp, type, embedding}]}` → `{appended, skipped, max_id}` (dedup by hn_id)
 - `GET  /max_id` → `{max_id}` (resume point for the daily updater)
+
+`docs.sqlite` also carries an `hn_id` index (created idempotently on every startup)
+so `/similar`'s lookup isn't a full table scan.
 
 ## Build & run locally
 

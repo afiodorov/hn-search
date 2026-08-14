@@ -7,8 +7,11 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
 
 ## Layout
 
-- `hn_search/` — Python web app: FastAPI + SSE API, LangGraph RAG, ONNX query encoder,
-  Redis cache, `search_backend.py` (talks to the Rust service).
+- `hn_search/` — Python web app: FastAPI + SSE API, agentic LangGraph RAG
+  (`rag/agent.py`: tool-calling planner + guaranteed baseline search, fused by rank
+  and handed to DeepSeek — see `rag/tools.py` for the `semantic_search`/
+  `similar_comments` tools), ONNX query encoder, Redis cache, `search_backend.py`
+  (talks to the Rust service).
 - `rust-search/` — the search service (axum, rayon, memmap2, rusqlite, half).
   `src/main.rs` is the HTTP layer; `index.rs`/`quantize.rs`/`db.rs` do the work.
 - `misc/` — data pipeline: BigQuery fetch, GPU/CPU embedding, artifact build, the
@@ -31,7 +34,9 @@ binary-quantized Hamming shortlist (`codes.bin`, hot) → f16 exact-cosine reran
 the tail and are searchable immediately, no rebuild.
 
 Endpoints (all but `/health` need `Authorization: Bearer`):
-`GET /health`, `POST /search`, `POST /append`, `GET /max_id`.
+`GET /health`, `POST /search` (accepts optional `time_after`/`time_before` ISO8601
+bounds), `POST /similar` (`{hn_id, k?}` — reuses the doc's own stored embedding,
+excludes itself; 404 if not found), `POST /append`, `GET /max_id`.
 
 Auth is **two-token**: `HN_SEARCH_TOKEN` (read → `/search`) and
 `HN_SEARCH_ADMIN_TOKEN` (write → `/append`, `/max_id`). Admin is a superset.
@@ -120,3 +125,10 @@ ARTIFACT_DIR=./artifacts PORT=8001 HN_SEARCH_TOKEN=dev ./target/release/rust-sea
 - Format/lint: `make format`, `make lint` (ruff). Line length 88, target py313.
 - Type checking: `make typecheck` (pyright, `basic` mode; needs `uv sync --extra dev`).
 - Auth is **disabled** when no token env is set (local dev only).
+- RAG regression check: `uv run python misc/eval_judge.py` replays
+  `evals/production_queries.jsonl` (real logged queries, see `job_manager.py`'s
+  `log_eval_record`) through the current pipeline and has an LLM judge flag any
+  answer that's gotten worse on its own merits (not just "different" — retrieval
+  is expected to change as tools are added). Run by hand after a meaningful RAG
+  change, not on every commit; re-export the eval set with
+  `misc/export_eval_log.py` periodically.

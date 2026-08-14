@@ -16,7 +16,9 @@ question with cited sources.
 - 🦀 **Purpose-built Rust search service**: binary-quantized Hamming brute-force +
   float16 exact rerank over `mmap`'d flat files — **~1.1 GB RAM for 12M vectors**,
   proven **recall@10 = 1.000** vs exact cosine
-- 🤖 **RAG**: LangGraph workflow + DeepSeek LLM with token streaming and citations
+- 🤖 **Agentic RAG**: a LangGraph tool-calling planner (semantic search — optionally
+  date-bounded — and "find comments like this HN link") fused by rank (RRF) with a
+  guaranteed verbatim baseline search, then DeepSeek drafts the cited answer
 - ⚡ **ONNX query encoder**: serve without torch (~300 MB instead of ~1.5 GB RAM)
 - 🔄 **Online updates**: daily incremental `/append`, no index rebuild
 - 🔐 **Two-token auth**: read token on the public web app, admin (write) token only
@@ -38,6 +40,12 @@ question with cited sources.
 
   daily update (laptop):  /max_id → BigQuery (id>max) → ONNX embed → HTTPS /append → tail
 ```
+
+Simplified above: the LangGraph planner sits in front of `/search` — it always runs a
+verbatim baseline search, and can additionally call `/search` again with a rewritten
+query or date bounds, or `/similar {hn_id}` (reusing a comment's own stored embedding,
+no reembedding) when the question references a specific HN link — before all result
+lists are fused by rank (RRF) and handed to DeepSeek. See `hn_search/rag/agent.py`.
 
 ### The Rust service (`rust-search/`)
 
@@ -64,6 +72,7 @@ dumb scan that's cheaper, simpler, and has guaranteed recall.
 ## 🛠️ Stack
 
 - **Web/serve**: Python 3.13, FastAPI + SSE, LangGraph + LangChain, Redis, [uv](https://github.com/astral-sh/uv)
+- **Tooling**: ruff (format/lint), pyright (`make typecheck`)
 - **Search service**: Rust — axum, rayon, memmap2, rusqlite, half
 - **Embeddings**: [all-mpnet-base-v2](https://huggingface.co/sentence-transformers/all-mpnet-base-v2)
   (768-d) — torch for batch embedding, **ONNX Runtime** at serve time (no torch)
@@ -145,7 +154,7 @@ hn-search/
 │   ├── common.py              # ONNX query encoder
 │   ├── cache_config.py        # Redis caching
 │   ├── api/                   # FastAPI (SSE search, recent queries, static UI)
-│   └── rag/                   # graph.py / nodes.py / pipeline.py / cli.py / state.py
+│   └── rag/                   # agent.py (tool-calling graph) / tools.py / nodes.py / pipeline.py / cli.py / state.py
 ├── rust-search/               # Rust vector search service
 │   ├── src/                   # quantize / index (mmap + tail) / db / main (axum)
 │   ├── deploy/                # systemd unit + Caddyfile
@@ -156,7 +165,9 @@ hn-search/
 │   ├── build_search_artifacts.py      # parquet → artifact files
 │   ├── fetch_and_embed_new_comments.py# daily incremental → /append
 │   ├── verify_artifacts.py            # artifact integrity check
-│   └── eval_rust_parity.py            # recall vs exact cosine
+│   ├── eval_rust_parity.py            # recall vs exact cosine
+│   ├── eval_judge.py                  # LLM-as-judge regression check for the RAG pipeline
+│   └── export_eval_log.py             # dump the durable Redis eval log to evals/*.jsonl
 ├── frontend/                  # React + Vite + TS UI
 ├── pyproject.toml · Makefile · Dockerfile · docker-compose.yml
 ```
