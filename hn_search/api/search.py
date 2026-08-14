@@ -77,6 +77,16 @@ def _process(query: str, job_id: str):
                 sources = event["sources"]
             elif etype == "answer":
                 answer = event["text"]
+                # Persist the moment the answer is known, before trying to
+                # forward it — if the client disconnected while we were
+                # working (tab backgrounded/discarded mid-request), yielding
+                # below throws GeneratorExit and we'd never reach the
+                # store_result call after the loop, silently discarding a
+                # fully-computed answer. Anything attach()ed or replaying this
+                # job would then hang forever waiting for a result that was
+                # actually done and just never got saved.
+                job_manager.store_result(job_id, {"answer": answer, "sources": sources})
+                job_manager.log_eval_record(query, sources, answer)
             elif etype == "error":
                 job_manager.store_error(job_id, event["message"])
                 yield _sse(event)
@@ -84,8 +94,6 @@ def _process(query: str, job_id: str):
                 return
             yield _sse(event)
 
-        job_manager.store_result(job_id, {"answer": answer, "sources": sources})
-        job_manager.log_eval_record(query, sources, answer)
         yield _done()
     except Exception as e:
         logger.exception(f"Search failed for: {query}")
