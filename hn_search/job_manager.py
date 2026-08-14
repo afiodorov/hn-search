@@ -118,7 +118,12 @@ class JobManager:
             raw = self.redis.get(progress_key)
             events = json.loads(raw) if raw else []
             events.append(event)
-            self.redis.setex(progress_key, 300, json.dumps(events))  # 5 min TTL
+            # Must match result_ttl: a completed job's stored result is served
+            # alongside its progress events (see api/search.py's _replay), so a
+            # shorter TTL here meant the progress log silently vanished on any
+            # cache hit older than 5 minutes while the answer was still served.
+            self.redis.setex(progress_key, self.result_ttl, json.dumps(events))
+
         except Exception:
             pass  # Silent fail for progress updates
 
