@@ -20,7 +20,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, cast
 
 import html2text
 import pandas as pd
@@ -85,7 +85,9 @@ def get_max_id_rust() -> int:
     return max_id
 
 
-def fetch_from_bigquery(min_id, output_dir="data/raw", state=None, project=None) -> Optional[Path]:
+def fetch_from_bigquery(
+    min_id, output_dir="data/raw", state=None, project=None
+) -> Optional[Path]:
     """Fetch new comments from BigQuery starting after min_id."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -157,15 +159,19 @@ def embed_and_append(parquet_file, chunk_size=1000) -> int:
     """
     print(f"\n🔄 Loading {parquet_file}")
     df = pd.read_parquet(parquet_file)
-    df = df[df["text"].notna() & (df["text"] != "")]
+    # pandas-stubs resolves boolean-mask indexing ambiguously here; the runtime
+    # value is always a DataFrame.
+    df = cast(pd.DataFrame, df[df["text"].notna() & (df["text"] != "")])
     df["clean_text"] = df["text"].astype(str).apply(strip_html)
-    df = df[df["clean_text"].str.len() > 0]
+    df = cast(pd.DataFrame, df[df["clean_text"].str.len() > 0])
     total = len(df)
     if total == 0:
         print("No valid documents after cleaning")
         return 0
 
-    print(f"Processing {total:,} documents with ONNX encoder, {chunk_size}-row chunks...")
+    print(
+        f"Processing {total:,} documents with ONNX encoder, {chunk_size}-row chunks..."
+    )
     model = get_model()
     # ONNX attention/FFN activations scale with batch_size * MAX_SEQ_LENGTH; on the
     # memory-capped Hetzner box (LocalExecutor runs this inside airflow.service's
@@ -184,7 +190,9 @@ def embed_and_append(parquet_file, chunk_size=1000) -> int:
     return total_appended
 
 
-def generate_embeddings(parquet_file, state=None) -> Tuple[Optional[Path], Optional[pd.DataFrame]]:
+def generate_embeddings(
+    parquet_file, state=None
+) -> Tuple[Optional[Path], Optional[pd.DataFrame]]:
     """Embed new comments using the ONNX encoder (no torch/GPU required)."""
     output_file = Path(str(parquet_file).replace(".parquet", "_embedded.parquet"))
     if output_file.exists():
@@ -193,9 +201,11 @@ def generate_embeddings(parquet_file, state=None) -> Tuple[Optional[Path], Optio
 
     print(f"\n🔄 Loading {parquet_file}")
     df = pd.read_parquet(parquet_file)
-    df = df[df["text"].notna() & (df["text"] != "")]
+    # pandas-stubs resolves boolean-mask indexing ambiguously here; the runtime
+    # value is always a DataFrame.
+    df = cast(pd.DataFrame, df[df["text"].notna() & (df["text"] != "")])
     df["clean_text"] = df["text"].astype(str).apply(strip_html)
-    df = df[df["clean_text"].str.len() > 0]
+    df = cast(pd.DataFrame, df[df["clean_text"].str.len() > 0])
     if len(df) == 0:
         print("No valid documents after cleaning")
         return None, None
@@ -249,11 +259,15 @@ def append_to_rust(df, batch_size=1000) -> int:
             }
             for _, row in chunk.iterrows()
         ]
-        resp = httpx.post(f"{url}/append", json={"rows": rows}, headers=headers, timeout=120)
+        resp = httpx.post(
+            f"{url}/append", json={"rows": rows}, headers=headers, timeout=120
+        )
         resp.raise_for_status()
         j = resp.json()
         total_appended += j["appended"]
-        print(f"  appended {j['appended']} skipped {j['skipped']} (max_id={j['max_id']})")
+        print(
+            f"  appended {j['appended']} skipped {j['skipped']} (max_id={j['max_id']})"
+        )
     print(f"✅ Appended {total_appended:,} new rows to rust service")
     return total_appended
 
@@ -285,12 +299,16 @@ def cleanup_artifacts(data_dir="data/raw"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fetch, embed, and append new HN comments")
+    parser = argparse.ArgumentParser(
+        description="Fetch, embed, and append new HN comments"
+    )
     parser.add_argument("--skip-fetch", action="store_true")
     parser.add_argument("--skip-embed", action="store_true")
     parser.add_argument("--skip-append", action="store_true")
     parser.add_argument("--reset", action="store_true", help="Reset local fetch state")
-    parser.add_argument("--project", type=str, help="GCP project ID for BigQuery billing")
+    parser.add_argument(
+        "--project", type=str, help="GCP project ID for BigQuery billing"
+    )
     args = parser.parse_args()
 
     print("=" * 80)

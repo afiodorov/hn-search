@@ -118,4 +118,5 @@ ARTIFACT_DIR=./artifacts PORT=8001 HN_SEARCH_TOKEN=dev ./target/release/rust-sea
 ```
 
 - Format/lint: `make format`, `make lint` (ruff). Line length 88, target py313.
+- Type checking: `make typecheck` (pyright, `basic` mode; needs `uv sync --extra dev`).
 - Auth is **disabled** when no token env is set (local dev only).

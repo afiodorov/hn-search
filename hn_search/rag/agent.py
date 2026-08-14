@@ -20,7 +20,7 @@ real multi-turn loop is a later step, for when a tool's result needs to inform a
 
 import json
 from datetime import datetime, timezone
-from typing import Annotated, TypedDict
+from typing import Annotated, TypedDict, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
@@ -31,6 +31,7 @@ from hn_search.cache_config import cache_answer, get_cached_answer
 from hn_search.logging_config import get_logger
 
 from .nodes import build_context, build_prompt, make_llm
+from .state import SearchResult
 from .tools import semantic_search, similar_comments
 
 logger = get_logger(__name__)
@@ -49,14 +50,14 @@ _RRF_K = 60
 
 
 def _reciprocal_rank_fusion(
-    result_lists: list[list[dict]], k: int = _RRF_K, limit: int = _MAX_SOURCES
-) -> list[dict]:
+    result_lists: list[list[SearchResult]], k: int = _RRF_K, limit: int = _MAX_SOURCES
+) -> list[SearchResult]:
     """Fuse several ranked result lists (e.g. baseline search + each agent-added
     search) by rank rather than raw distance — raw cosine distances from
     different query embeddings aren't on a comparable scale, but rank position
     within a list always is."""
     scores: dict[str, float] = {}
-    docs: dict[str, dict] = {}
+    docs: dict[str, SearchResult] = {}
     for results in result_lists:
         for rank, doc in enumerate(results, start=1):
             doc_id = doc["id"]
@@ -96,7 +97,7 @@ _SYSTEM_PROMPT = (
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     query: str
-    sources: list[dict]
+    sources: list[SearchResult]
     answer: str
 
 
@@ -145,7 +146,7 @@ def _gather_sources(state: AgentState) -> AgentState:
         }
     )
 
-    agent_result_lists: list[list[dict]] = []
+    agent_result_lists: list[list[SearchResult]] = []
     for m in state["messages"]:
         if getattr(m, "type", None) == "tool" and m.name in _TOOL_NAMES:
             content = m.content
@@ -170,7 +171,9 @@ def _synthesize_answer(state: AgentState) -> AgentState:
         return {**state, "answer": cached_answer}
 
     llm = make_llm()
-    answer = llm.invoke(build_prompt(query, context)).content
+    # DeepSeek's chat completions are text-only, so .content is always a plain
+    # str here despite BaseMessage's broader str | list[...] type.
+    answer = cast(str, llm.invoke(build_prompt(query, context)).content)
     cache_answer(query, context, answer)
     return {**state, "answer": answer}
 

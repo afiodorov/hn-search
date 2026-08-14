@@ -38,11 +38,16 @@ dev = [
     "google-cloud-bigquery-storage>=2.0.0",
     "html2text>=2025.4.15",
     "ruff",
+    "pyright",
 ]
 
 [tool.ruff]
 line-length = 88
 target-version = "py313"
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
 
 [build-system]
 requires = ["hatchling"]

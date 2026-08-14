@@ -1,4 +1,4 @@
-.PHONY: format lint clean fetch embed artifacts rebuild
+.PHONY: format lint typecheck clean fetch embed artifacts rebuild
 
 # Default target - run both formatting and linting
 format:
@@ -16,6 +16,10 @@ fmt:
 # Run linting (without fixes)
 lint:
 	uv run ruff check .
+
+# Static type checking (requires the dev extra: uv sync --extra dev)
+typecheck:
+	uv run pyright
 
 # Clean ChromaDB container and volumes
 clean:

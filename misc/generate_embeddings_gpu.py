@@ -16,6 +16,7 @@ Run on a CUDA box (torch + sentence-transformers are in the `dev` extra):
 import argparse
 from glob import glob
 from pathlib import Path
+from typing import cast
 
 import html2text
 import numpy as np
@@ -38,9 +39,9 @@ def strip_html(text: str) -> str:
 
 def pick_device() -> str:
     if torch.cuda.is_available():
-        print(
-            f"🚀 CUDA GPU: {torch.cuda.get_device_name(0)} (CUDA {torch.version.cuda})"
-        )
+        # torch.version is set dynamically at import time, not in torch's stubs.
+        cuda_version = torch.version.cuda  # pyright: ignore[reportAttributeAccessIssue]
+        print(f"🚀 CUDA GPU: {torch.cuda.get_device_name(0)} (CUDA {cuda_version})")
         return "cuda"
     if torch.backends.mps.is_available():
         print("🚀 MPS (Apple Silicon)")
@@ -51,9 +52,11 @@ def pick_device() -> str:
 
 def embed_file(model, in_file: Path, out_file: Path, encode_batch_size: int):
     df = pd.read_parquet(in_file)
-    df = df[df["text"].notna() & (df["text"] != "")].copy()
+    # pandas-stubs resolves boolean-mask indexing ambiguously here; the runtime
+    # value is always a DataFrame.
+    df = cast(pd.DataFrame, df[df["text"].notna() & (df["text"] != "")]).copy()
     df["clean_text"] = df["text"].astype(str).apply(strip_html)
-    df = df[df["clean_text"].str.len() > 0]
+    df = cast(pd.DataFrame, df[df["clean_text"].str.len() > 0])
     if len(df) == 0:
         print(f"  {in_file.name}: no valid rows after cleaning, skipping")
         return 0

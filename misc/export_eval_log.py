@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 from pathlib import Path
+from typing import cast
 
 import redis
 from dotenv import load_dotenv
@@ -31,7 +32,9 @@ def main():
     args = parser.parse_args()
 
     client = redis.from_url(args.redis_url)
-    raw_records = client.lrange("eval:log", 0, -1)
+    # redis-py's stubs return a sync/async union from a shared command mixin;
+    # this client is always sync.
+    raw_records = cast(list[bytes], client.lrange("eval:log", 0, -1))
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

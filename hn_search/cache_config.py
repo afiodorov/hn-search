@@ -3,7 +3,7 @@
 import hashlib
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence, cast
 from urllib.parse import urlparse
 
 import redis
@@ -82,7 +82,9 @@ def get_cached_vector_search(
         return None
     try:
         cache_key = get_vector_cache_key(query, k, time_after, time_before)
-        cached = redis_client.get(cache_key)
+        # redis-py's stubs return a sync/async union (ResponseT) from a shared
+        # command mixin; this client is always sync, so narrow it explicitly.
+        cached = cast(Optional[bytes], redis_client.get(cache_key))
         if cached:
             return json.loads(cached)
     except Exception:
@@ -92,7 +94,7 @@ def get_cached_vector_search(
 
 def cache_vector_search(
     query: str,
-    results: List[Dict[str, Any]],
+    results: Sequence[Mapping[str, Any]],
     k: int = 10,
     time_after: Optional[str] = None,
     time_before: Optional[str] = None,
@@ -121,7 +123,7 @@ def get_cached_answer(query: str, context: str) -> Optional[str]:
         return None
     try:
         cache_key = get_answer_cache_key(query, context)
-        cached = redis_client.get(cache_key)
+        cached = cast(Optional[bytes], redis_client.get(cache_key))
         if cached:
             return cached.decode("utf-8")
     except Exception:

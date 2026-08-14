@@ -2,6 +2,7 @@ import os
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 from .state import SearchResult
 
@@ -38,19 +39,21 @@ def rows_to_results(rows) -> list[SearchResult]:
     ]
 
 
-def results_to_cache_data(results: list[SearchResult]) -> list[dict]:
+def results_to_cache_data(results: list[SearchResult]) -> list[SearchResult]:
     """Convert SearchResults into JSON-able dicts for the Redis cache."""
     return [
-        {
-            "id": r["id"],
-            "text": r["text"],
-            "author": r["author"],
-            "timestamp": r["timestamp"].isoformat()
+        SearchResult(
+            id=r["id"],
+            text=r["text"],
+            author=r["author"],
+            # SearchResult declares timestamp: str, but a raw DB row can still
+            # hand this a datetime before it's been normalized — handle both.
+            timestamp=r["timestamp"].isoformat()  # pyright: ignore[reportAttributeAccessIssue]
             if hasattr(r["timestamp"], "isoformat")
             else str(r["timestamp"]),
-            "type": r["type"],
-            "distance": float(r["distance"]),
-        }
+            type=r["type"],
+            distance=float(r["distance"]),
+        )
         for r in results
     ]
 
@@ -91,9 +94,10 @@ def make_llm(temperature: float = 0.7) -> ChatOpenAI:
     # cache=False: opt out of any global LangChain LLM cache (unreliable with
     # .stream()); the explicit get_cached_answer/cache_answer functions are
     # the real answer cache.
+    api_key = os.getenv("DEEPSEEK_API_KEY")
     return ChatOpenAI(
         model="deepseek-v4-flash",
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        api_key=SecretStr(api_key) if api_key else None,
         base_url="https://api.deepseek.com",
         temperature=temperature,
         cache=False,

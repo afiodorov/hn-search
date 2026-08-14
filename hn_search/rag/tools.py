@@ -1,5 +1,7 @@
 """Tools for the agentic retrieval loop."""
 
+from typing import cast
+
 from langchain_core.tools import tool
 
 from hn_search.cache_config import cache_vector_search, get_cached_vector_search
@@ -7,6 +9,7 @@ from hn_search.common import get_model
 from hn_search.search_backend import search, similar
 
 from .nodes import results_to_cache_data, rows_to_results
+from .state import SearchResult
 
 
 @tool
@@ -15,7 +18,7 @@ def semantic_search(
     k: int = 10,
     time_after: str | None = None,
     time_before: str | None = None,
-) -> list[dict]:
+) -> list[SearchResult]:
     """Search Hacker News comments and stories by semantic similarity to a query.
 
     time_after/time_before optionally restrict results to a date range — pass
@@ -28,7 +31,7 @@ def semantic_search(
     """
     cached = get_cached_vector_search(query, k, time_after, time_before)
     if cached:
-        return cached
+        return cast(list[SearchResult], cached)
 
     embedding = get_model().encode([query])[0]
     rows = search(embedding, k, time_after=time_after, time_before=time_before)
@@ -39,7 +42,7 @@ def semantic_search(
 
 
 @tool
-def similar_comments(hn_id: str, k: int = 10) -> list[dict]:
+def similar_comments(hn_id: str, k: int = 10) -> list[SearchResult]:
     """Find Hacker News comments similar to a specific comment, given its numeric
     id (e.g. from a news.ycombinator.com/item?id=... link the user pasted, or a
     bare id they mentioned). Reuses that comment's own embedding — no need to

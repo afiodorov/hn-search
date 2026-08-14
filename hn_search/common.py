@@ -84,7 +84,9 @@ class OnnxEncoder:
             feed["token_type_ids"] = np.zeros_like(input_ids)
         feed = {k: v for k, v in feed.items() if k in self.input_names}
 
-        token_embeddings = self.session.run(None, feed)[0]  # [B, T, 768]
+        # session.run()'s return type is a broad ORT union (ndarray | SparseTensor |
+        # list | dict); this model always yields a plain ndarray per output.
+        token_embeddings = np.asarray(self.session.run(None, feed)[0])  # [B, T, 768]
 
         # Masked mean pooling over tokens, then L2 normalize (cosine-ready).
         mask = attention_mask[:, :, None].astype(np.float32)

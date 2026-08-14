@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from .agent import create_agent_workflow
+from .agent import AgentState, create_agent_workflow
 
 
 def main():
@@ -17,7 +17,7 @@ def main():
 
     app = create_agent_workflow()
 
-    initial_state = {"messages": [], "query": args.query, "sources": [], "answer": ""}
+    initial_state = AgentState(messages=[], query=args.query, sources=[], answer="")
 
     try:
         final_state = app.invoke(initial_state)

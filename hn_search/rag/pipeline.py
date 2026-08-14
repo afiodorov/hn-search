@@ -14,7 +14,7 @@ from typing import Iterator, Optional
 
 from hn_search.logging_config import get_logger
 
-from .agent import create_agent_workflow
+from .agent import AgentState, create_agent_workflow
 
 logger = get_logger(__name__)
 
@@ -57,7 +57,7 @@ def search_stream(query: str) -> Iterator[dict]:
     """Drives the compiled tool-calling graph, translating its per-node updates
     into typed SSE events."""
     workflow = create_agent_workflow()
-    initial_state = {"messages": [], "query": query, "sources": [], "answer": ""}
+    initial_state = AgentState(messages=[], query=query, sources=[], answer="")
 
     try:
         yield _progress("agent", "start")
