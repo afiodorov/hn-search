@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from .graph import create_rag_workflow
+from .agent import create_agent_workflow
 
 
 def main():
@@ -15,16 +15,12 @@ def main():
     print("🔎 Hacker News RAG Search")
     print("=" * 70 + "\n")
 
-    app = create_rag_workflow()
+    app = create_agent_workflow()
 
-    initial_state = {"query": args.query}
+    initial_state = {"messages": [], "query": args.query, "sources": [], "answer": ""}
 
     try:
         final_state = app.invoke(initial_state)
-
-        if final_state.get("error_message"):
-            print(f"\n❌ Error: {final_state['error_message']}\n")
-            sys.exit(1)
 
         print("\n" + "-" * 70)
         print("💬 Answer:")
@@ -32,7 +28,7 @@ def main():
         print(final_state["answer"])
 
         print("\n" + "-" * 70)
-        print(f"📚 Based on {len(final_state['search_results'])} HN comments/articles")
+        print(f"📚 Based on {len(final_state['sources'])} HN comments/articles")
         print("-" * 70 + "\n")
 
     except Exception as e:

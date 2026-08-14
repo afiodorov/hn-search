@@ -40,15 +40,49 @@ def _get_client():
     return _client
 
 
-def search(query_embedding, n_results: int) -> list[tuple]:
-    """POST the query vector to the Rust service; return rows as pg-shaped tuples."""
+def _rows(hits: list[dict]) -> list[tuple]:
+    return [
+        (
+            h["id"],
+            h["clean_text"],
+            h["author"],
+            h["timestamp"],
+            h["type"],
+            h["distance"],
+        )
+        for h in hits
+    ]
+
+
+def search(
+    query_embedding,
+    n_results: int,
+    time_after: str | None = None,
+    time_before: str | None = None,
+) -> list[tuple]:
+    """POST the query vector to the Rust service; return rows as pg-shaped tuples.
+
+    time_after/time_before (ISO8601) optionally filter by timestamp; omitting both
+    is identical to a plain search.
+    """
     if not RUST_URL:
         raise RuntimeError("HN_SEARCH_URL is not set for the rust search backend")
-    resp = _get_client().post(
-        "/search", json={"embedding": _to_list(query_embedding), "k": n_results}
-    )
+    body = {"embedding": _to_list(query_embedding), "k": n_results}
+    if time_after:
+        body["time_after"] = time_after
+    if time_before:
+        body["time_before"] = time_before
+    resp = _get_client().post("/search", json=body)
     resp.raise_for_status()
-    return [
-        (h["id"], h["clean_text"], h["author"], h["timestamp"], h["type"], h["distance"])
-        for h in resp.json()
-    ]
+    return _rows(resp.json())
+
+
+def similar(hn_id: str, n_results: int) -> list[tuple]:
+    """POST to the Rust /similar endpoint: reuses hn_id's own stored embedding as
+    the query, returning related comments (excluding hn_id itself). Raises if
+    hn_id isn't a known comment (404 from the service)."""
+    if not RUST_URL:
+        raise RuntimeError("HN_SEARCH_URL is not set for the rust search backend")
+    resp = _get_client().post("/similar", json={"hn_id": hn_id, "k": n_results})
+    resp.raise_for_status()
+    return _rows(resp.json())

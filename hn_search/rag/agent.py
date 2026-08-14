@@ -1,24 +1,25 @@
 """Agentic graph: a tool-calling planner, a guaranteed baseline search, and a
 dedicated synthesis node.
 
-The planner LLM may call semantic_search zero or more times with a rewritten or
-combined query if it thinks that helps retrieval — but we don't rely on it
-following instructions to *also* search the user's literal query; an LLM can't be
-fully trusted to follow a "search verbatim" instruction (verified empirically: an
-earlier prompt asked for verbatim-only search and the model rewrote it anyway,
-drifting retrieval away from legacy behavior — see eval_judge history). So a plain
-verbatim semantic_search on the user's exact question always runs too, deterministically,
-outside the LLM's control. gather_sources merges the two (preferring the verbatim
-copy of a doc if both found it), and synthesize_answer drafts the final cited
-answer from the combined set.
+The planner LLM may call semantic_search (optionally date-bounded) or
+similar_comments (by HN id/link) zero or more times if it thinks that helps
+retrieval — but we don't rely on it following instructions to *also* search the
+user's literal query; an LLM can't be fully trusted to follow a "search verbatim"
+instruction (verified empirically: an earlier prompt asked for verbatim-only
+search and the model rewrote it anyway, drifting retrieval away from legacy
+behavior — see eval_judge history). So a plain verbatim semantic_search on the
+user's exact question always runs too, deterministically, outside the LLM's
+control. gather_sources fuses all result lists by rank (RRF) and caps the pool,
+and synthesize_answer drafts the final cited answer from the combined set.
 
 Still single-hop for the planner (it can request 1+ tool calls in one turn, which
-ToolNode runs together, but the graph doesn't loop back to the planner after) —
-a real multi-turn loop is Stage 2's job, once there's more than one *kind* of tool
-to sequence between (id lookup, thread context, etc).
+ToolNode runs together, but the graph doesn't loop back to the planner after) — a
+real multi-turn loop is a later step, for when a tool's result needs to inform a
+*subsequent* tool choice (e.g. thread context once parent/child data exists).
 """
 
 import json
+from datetime import datetime, timezone
 from typing import Annotated, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -30,11 +31,12 @@ from hn_search.cache_config import cache_answer, get_cached_answer
 from hn_search.logging_config import get_logger
 
 from .nodes import build_context, build_prompt, make_llm
-from .tools import semantic_search
+from .tools import semantic_search, similar_comments
 
 logger = get_logger(__name__)
 
-_TOOLS = [semantic_search]
+_TOOLS = [semantic_search, similar_comments]
+_TOOL_NAMES = {t.name for t in _TOOLS}
 _DEFAULT_K = 10
 # Cap on the merged (baseline + agent-added) source pool fed to synthesis, so
 # context size — and DeepSeek latency/cost — doesn't scale with how many extra
@@ -65,15 +67,26 @@ def _reciprocal_rank_fusion(
 
 
 _SYSTEM_PROMPT = (
-    "You are the retrieval planner for a Hacker News search assistant. A plain "
-    "semantic search on the user's exact question always runs automatically, "
-    "regardless of what you do, so you do not need to (and should not bother to) "
-    "search the verbatim question yourself. Your job is to decide whether ANY "
-    "ADDITIONAL search would surface better results on top of that baseline — for "
-    "example: a rewritten or clarified version if the question is ambiguous or "
-    "colloquially phrased, a narrower or broader phrasing, or a couple of separate "
-    "calls to cover distinct aspects of a compound question. Call semantic_search "
-    "as many times as genuinely useful for this (rarely more than two or three "
+    "You are the retrieval planner for a Hacker News search assistant. Today's "
+    "date is {today}. A plain semantic search on the user's exact question always "
+    "runs automatically, regardless of what you do, so you do not need to (and "
+    "should not bother to) search the verbatim question yourself. Your job is to "
+    "decide whether ANY ADDITIONAL tool calls would surface better results on top "
+    "of that baseline:\n\n"
+    "- If the question contains a news.ycombinator.com/item?id=... link or a bare "
+    "HN comment id, and the user wants comments *like* or *related to* it, call "
+    "similar_comments with that id instead of (or in addition to) semantic_search "
+    "— it reuses the comment's own embedding directly, no need to describe its "
+    "content in words.\n"
+    "- If the question mentions a time period ('last 6 months', 'since 2023', "
+    "'in 2022'), call semantic_search with time_after/time_before set to the "
+    "actual ISO8601 dates you compute from today's date (the automatic baseline "
+    "search will pick up and reuse the same bounds automatically).\n"
+    "- Otherwise, call semantic_search again with a rewritten or clarified query "
+    "if the question is ambiguous or colloquially phrased, a narrower or broader "
+    "phrasing, or a couple of separate calls to cover distinct aspects of a "
+    "compound question.\n\n"
+    "Call tools as many times as genuinely useful (rarely more than two or three "
     "extra calls), or not at all if the baseline is clearly sufficient. Never "
     "attempt to answer the question yourself — a separate step drafts the final "
     "answer from all search results gathered."
@@ -90,8 +103,9 @@ class AgentState(TypedDict):
 def _agent_node(state: AgentState) -> AgentState:
     messages = state["messages"]
     if not messages:
+        today = datetime.now(timezone.utc).date().isoformat()
         messages = [
-            SystemMessage(content=_SYSTEM_PROMPT),
+            SystemMessage(content=_SYSTEM_PROMPT.format(today=today)),
             HumanMessage(content=state["query"]),
         ]
     # Deterministic tool selection: which extra searches (if any) get made should
@@ -102,16 +116,38 @@ def _agent_node(state: AgentState) -> AgentState:
     return {**state, "messages": messages + [response]}
 
 
+def _agent_time_bounds(messages: list) -> tuple[str | None, str | None]:
+    """If the planner applied a date filter to any of its own searches, the
+    guaranteed baseline search should respect it too — otherwise an unfiltered
+    baseline leaks stale results back into a deliberately date-scoped query via
+    RRF fusion, defeating the point of the filter. Takes the first bound found;
+    in practice the planner applies the same window to every call it makes for
+    one query."""
+    for m in messages:
+        for tc in getattr(m, "tool_calls", None) or []:
+            args = tc.get("args", {})
+            after, before = args.get("time_after"), args.get("time_before")
+            if after or before:
+                return after, before
+    return None, None
+
+
 def _gather_sources(state: AgentState) -> AgentState:
     """Run the guaranteed verbatim baseline search, then fuse it by rank (RRF)
     with whatever the planner agent additionally searched for."""
+    time_after, time_before = _agent_time_bounds(state["messages"])
     verbatim_results = semantic_search.invoke(
-        {"query": state["query"], "k": _DEFAULT_K}
+        {
+            "query": state["query"],
+            "k": _DEFAULT_K,
+            "time_after": time_after,
+            "time_before": time_before,
+        }
     )
 
     agent_result_lists: list[list[dict]] = []
     for m in state["messages"]:
-        if getattr(m, "type", None) == "tool" and m.name == "semantic_search":
+        if getattr(m, "type", None) == "tool" and m.name in _TOOL_NAMES:
             content = m.content
             if isinstance(content, str):
                 try:

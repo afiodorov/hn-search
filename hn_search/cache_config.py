@@ -55,17 +55,33 @@ except Exception as e:
 
 
 # Vector search cache functions
-def get_vector_cache_key(query: str, k: int = 10) -> str:
-    """Generate a cache key for vector search queries."""
-    return f"vector:{hashlib.md5(f'{query}:{k}'.encode()).hexdigest()}"
+def get_vector_cache_key(
+    query: str,
+    k: int = 10,
+    time_after: Optional[str] = None,
+    time_before: Optional[str] = None,
+) -> str:
+    """Generate a cache key for vector search queries.
+
+    time_after/time_before are folded into the key so a time-filtered search
+    never collides with (or reuses) a plain search's cache entry for the same
+    query text and k.
+    """
+    raw = f"{query}:{k}:{time_after or ''}:{time_before or ''}"
+    return f"vector:{hashlib.md5(raw.encode()).hexdigest()}"
 
 
-def get_cached_vector_search(query: str, k: int = 10) -> Optional[List[Dict[str, Any]]]:
+def get_cached_vector_search(
+    query: str,
+    k: int = 10,
+    time_after: Optional[str] = None,
+    time_before: Optional[str] = None,
+) -> Optional[List[Dict[str, Any]]]:
     """Get cached vector search results."""
     if not redis_client:
         return None
     try:
-        cache_key = get_vector_cache_key(query, k)
+        cache_key = get_vector_cache_key(query, k, time_after, time_before)
         cached = redis_client.get(cache_key)
         if cached:
             return json.loads(cached)
@@ -74,12 +90,18 @@ def get_cached_vector_search(query: str, k: int = 10) -> Optional[List[Dict[str,
     return None
 
 
-def cache_vector_search(query: str, results: List[Dict[str, Any]], k: int = 10):
+def cache_vector_search(
+    query: str,
+    results: List[Dict[str, Any]],
+    k: int = 10,
+    time_after: Optional[str] = None,
+    time_before: Optional[str] = None,
+):
     """Cache vector search results."""
     if not redis_client:
         return
     try:
-        cache_key = get_vector_cache_key(query, k)
+        cache_key = get_vector_cache_key(query, k, time_after, time_before)
         redis_client.setex(cache_key, RESULT_CACHE_TTL, json.dumps(results))
     except Exception:
         pass

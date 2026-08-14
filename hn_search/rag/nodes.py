@@ -3,21 +3,9 @@ import os
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
-from hn_search.cache_config import (
-    cache_answer,
-    cache_vector_search,
-    get_cached_answer,
-    get_cached_vector_search,
-)
-from hn_search.common import get_model
-from hn_search.logging_config import get_logger, log_time
-from hn_search.search_backend import search
-
-from .state import RAGState, SearchResult
+from .state import SearchResult
 
 load_dotenv()
-
-logger = get_logger(__name__)
 
 
 def cached_to_results(cached: list[dict]) -> list[SearchResult]:
@@ -110,101 +98,3 @@ def make_llm(temperature: float = 0.7) -> ChatOpenAI:
         temperature=temperature,
         cache=False,
     )
-
-
-def retrieve_node(state: RAGState) -> RAGState:
-    query = state["query"]
-    n_results = 10
-
-    try:
-        # Check cache first
-        with log_time(logger, "cache lookup"):
-            cached_results = get_cached_vector_search(query, n_results)
-
-        if cached_results:
-            logger.info(f"🔍 Using cached results for: {query}")
-            search_results = cached_to_results(cached_results)
-            context = build_context(search_results)
-
-            logger.info(
-                f"✅ Found {len(search_results)} relevant comments/articles (cached)"
-            )
-
-            return {
-                **state,
-                "search_results": search_results,
-                "context": context,
-            }
-
-        logger.info(f"🔍 Searching for: {query}")
-
-        # Use singleton embedding model
-        with log_time(logger, "query embedding generation"):
-            model = get_model()
-            query_embedding = model.encode([query])[0]
-
-        # Binary Hamming shortlist + exact cosine rerank, served by the Rust service.
-        with log_time(logger, "vector search (shortlist + rerank)"):
-            results = search(query_embedding, n_results)
-
-        with log_time(logger, "building results"):
-            search_results = rows_to_results(results)
-            cache_data = results_to_cache_data(search_results)
-
-        # Cache the results
-        if cache_data:
-            with log_time(logger, "caching search results"):
-                cache_vector_search(query, cache_data, n_results)
-
-        context = build_context(search_results)
-
-        logger.info(f"✅ Found {len(search_results)} relevant comments/articles")
-
-        return {
-            **state,
-            "search_results": search_results,
-            "context": context,
-        }
-    except Exception as e:
-        error_msg = "vector type not found in the database"
-        logger.exception(f"Database error: {str(e)}")
-        return {
-            **state,
-            "error_message": error_msg,
-            "search_results": [],
-            "context": "",
-        }
-
-
-def answer_node(state: RAGState) -> RAGState:
-    query = state["query"]
-    context = state["context"]
-
-    # Check cache first
-    with log_time(logger, "answer cache lookup"):
-        cached_answer = get_cached_answer(query, context)
-
-    if cached_answer:
-        logger.info("🤖 Using cached answer")
-        return {
-            **state,
-            "answer": cached_answer,
-        }
-
-    logger.info("🤖 Generating answer with DeepSeek...")
-
-    with log_time(logger, "LLM answer generation"):
-        llm = make_llm()
-        response = llm.invoke(build_prompt(query, context))
-        answer = response.content
-
-    # Cache the answer
-    with log_time(logger, "caching answer"):
-        cache_answer(query, context, answer)
-
-    logger.info("✅ Answer generated")
-
-    return {
-        **state,
-        "answer": answer,
-    }

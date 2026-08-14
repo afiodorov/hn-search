@@ -7,7 +7,6 @@ mirrored progress then the full answer in one shot (tokens are SSE-only).
 """
 
 import json
-import os
 import time
 
 from sse_starlette import ServerSentEvent
@@ -15,22 +14,11 @@ from sse_starlette import ServerSentEvent
 from hn_search.cache_config import redis_client
 from hn_search.job_manager import JobManager
 from hn_search.logging_config import get_logger
-from hn_search.rag.pipeline import search_stream, search_stream_agentic
+from hn_search.rag.pipeline import search_stream
 
 logger = get_logger(__name__)
 
 job_manager = JobManager(redis_client)
-
-# Stage 1 of the agentic RAG migration: "legacy" (default) keeps today's
-# hand-rolled retrieve+answer pipeline; "agentic" switches to the tool-calling
-# graph. Flip via env for validation before it becomes the default.
-_RAG_ENGINE = os.environ.get("HN_RAG_ENGINE", "legacy")
-
-
-def _search_stream(query: str):
-    if _RAG_ENGINE == "agentic":
-        return search_stream_agentic(query)
-    return search_stream(query)
 
 
 def _sse(event: dict) -> ServerSentEvent:
@@ -58,7 +46,7 @@ def sse_search(query: str):
 
 def _replay(query: str):
     try:
-        for event in _search_stream(query):
+        for event in search_stream(query):
             yield _sse(event)
             if event["type"] == "error":
                 break
@@ -73,7 +61,7 @@ def _process(query: str, job_id: str):
     sources = []
 
     try:
-        for event in _search_stream(query):
+        for event in search_stream(query):
             etype = event["type"]
             if etype == "progress":
                 job_manager.append_progress_event(job_id, event)

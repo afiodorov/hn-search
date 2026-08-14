@@ -1,4 +1,4 @@
-from typing import List, TypedDict
+from typing import TypedDict
 
 
 class SearchResult(TypedDict):
@@ -8,11 +8,3 @@ class SearchResult(TypedDict):
     text: str
     timestamp: str
     distance: float
-
-
-class RAGState(TypedDict):
-    query: str
-    search_results: List[SearchResult]
-    context: str
-    answer: str
-    error_message: str

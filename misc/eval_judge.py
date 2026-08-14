@@ -15,8 +15,7 @@ keys look like, so this is usually not an issue — but for a fully clean run,
 flush the relevant Redis first.
 
 Usage:
-    uv run python misc/eval_judge.py                    # replays against the agentic pipeline
-    uv run python misc/eval_judge.py --engine legacy     # sanity-check against the old pipeline
+    uv run python misc/eval_judge.py
     uv run python misc/eval_judge.py --limit 1           # cheap smoke test
 """
 
@@ -27,9 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hn_search.rag.nodes import make_llm
-from hn_search.rag.pipeline import search_stream, search_stream_agentic
-
-_ENGINES = {"legacy": search_stream, "agentic": search_stream_agentic}
+from hn_search.rag.pipeline import search_stream
 
 JUDGE_PROMPT = """You are grading whether a new answer to a question is still a \
 good answer, for regression-testing a Hacker News search/RAG system that is \
@@ -59,11 +56,11 @@ Respond with strict JSON and nothing else:
 {{"verdict": "PASS" or "FLAG", "reasoning": "<one or two sentences>"}}"""
 
 
-def run_query(query: str, engine) -> tuple[str, list[str]]:
-    """Drain the given search_stream-shaped generator, returning (answer, source_ids)."""
+def run_query(query: str) -> tuple[str, list[str]]:
+    """Drain search_stream for a query, returning (answer, source_ids)."""
     answer = ""
     source_ids: list[str] = []
-    for event in engine(query):
+    for event in search_stream(query):
         if event["type"] == "sources":
             source_ids = [s["id"] for s in event["sources"]]
         elif event["type"] == "answer":
@@ -95,9 +92,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval-file", default="evals/production_queries.jsonl")
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--engine", choices=_ENGINES, default="agentic")
     args = parser.parse_args()
-    engine = _ENGINES[args.engine]
 
     records = []
     with open(args.eval_file) as f:
@@ -117,7 +112,7 @@ def main():
         baseline_sources = set(r.get("source_ids", []))
 
         try:
-            new_answer, new_source_ids = run_query(query, engine)
+            new_answer, new_source_ids = run_query(query)
         except Exception as e:
             print(f"[ERROR] {query[:60]!r}: {e}")
             results.append({"query": query, "verdict": "ERROR", "reasoning": str(e)})
