@@ -35,24 +35,32 @@ def sse_search(query: str):
 
     if claimed:
         yield from _process(query, job_id)
-    elif job_manager.get_result(job_id):
-        # Job already completed (claim refused, result stored): replay through
-        # the pipeline. Its Redis caches make this near-instant and the client
-        # gets real progress events instead of none.
-        yield from _replay(query)
     else:
-        yield from _attach(query, job_id)
+        result = job_manager.get_result(job_id)
+        if result:
+            # Job already completed: serve the stored result directly. This
+            # used to re-run search_stream(query) on the assumption that its
+            # own Redis caches would make that near-instant — true for the old
+            # deterministic pipeline, but the agentic planner call is never
+            # cached and isn't perfectly reproducible, so "replaying" it was
+            # silently redoing real (slow) work instead of reusing the answer.
+            yield from _replay(job_id, result)
+        else:
+            yield from _attach(query, job_id)
 
 
-def _replay(query: str):
-    try:
-        for event in search_stream(query):
-            yield _sse(event)
-            if event["type"] == "error":
-                break
-    except Exception as e:
-        logger.exception(f"Replay failed for: {query}")
-        yield _sse({"type": "error", "message": str(e)})
+def _result_events(result: dict):
+    yield _sse({"type": "sources", "sources": result.get("sources", [])})
+    yield _sse({"type": "answer", "text": result.get("answer", "")})
+
+
+def _replay(job_id: str, result: dict):
+    """Serve an already-completed job's stored result. Replays its stored
+    progress events too, when they haven't expired (5 min TTL), for the same
+    step-by-step UI as a live run; falls back to just sources+answer after."""
+    for event in job_manager.get_progress_events(job_id):
+        yield _sse(event)
+    yield from _result_events(result)
     yield _done()
 
 
@@ -100,8 +108,7 @@ def _attach(query: str, job_id: str):
 
         result = job_manager.get_result(job_id)
         if result:
-            yield _sse({"type": "sources", "sources": result.get("sources", [])})
-            yield _sse({"type": "answer", "text": result.get("answer", "")})
+            yield from _result_events(result)
             yield _done()
             return
 
