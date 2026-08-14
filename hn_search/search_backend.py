@@ -86,3 +86,16 @@ def similar(hn_id: str, n_results: int) -> list[tuple]:
     resp = _get_client().post("/similar", json={"hn_id": hn_id, "k": n_results})
     resp.raise_for_status()
     return _rows(resp.json())
+
+
+def get_docs(hn_ids: list[str]) -> dict[str, dict]:
+    """Batch-fetch docs by hn_id (e.g. resolving parent_ids to their own
+    text/author/timestamp). Missing ids are simply absent from the returned
+    dict, not an error. Empty input short-circuits without a request."""
+    if not hn_ids:
+        return {}
+    if not RUST_URL:
+        raise RuntimeError("HN_SEARCH_URL is not set for the rust search backend")
+    resp = _get_client().post("/docs", json={"hn_ids": hn_ids})
+    resp.raise_for_status()
+    return {d["id"]: d for d in resp.json()}

@@ -70,11 +70,15 @@ class ArtifactWriter:
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS doc (rowid INTEGER PRIMARY KEY, hn_id TEXT, "
-            "clean_text TEXT, author TEXT, timestamp TEXT, type TEXT)"
+            "clean_text TEXT, author TEXT, timestamp TEXT, type TEXT, parent_id TEXT)"
         )
         self.count, self.last_id = self._reconcile()
-        self.codes_f = open(out / "codes.bin", "r+b" if (out / "codes.bin").exists() else "wb")
-        self.f16_f = open(out / "rerank_f16.bin", "r+b" if (out / "rerank_f16.bin").exists() else "wb")
+        self.codes_f = open(
+            out / "codes.bin", "r+b" if (out / "codes.bin").exists() else "wb"
+        )
+        self.f16_f = open(
+            out / "rerank_f16.bin", "r+b" if (out / "rerank_f16.bin").exists() else "wb"
+        )
         self.codes_f.seek(self.count * CODE_BYTES)
         self.f16_f.seek(self.count * F16_BYTES)
 
@@ -97,19 +101,23 @@ class ArtifactWriter:
                 "SELECT hn_id FROM doc WHERE rowid = ?", (count,)
             ).fetchone()
             last_id = row[0] if row else None  # text id (rows stream in id-text order)
-            print(f"↻ resuming from {count:,} rows (last id={last_id})", file=sys.stderr)
+            print(
+                f"↻ resuming from {count:,} rows (last id={last_id})", file=sys.stderr
+            )
         return count, last_id
 
     def write_batch(self, rows: list[tuple], vecs: np.ndarray):
-        """rows: list of (hn_id, clean_text, author, timestamp, type). vecs: (M,768)."""
-        self.codes_f.write(np.ascontiguousarray(quantize_block(vecs), dtype=np.uint8).tobytes())
+        """rows: list of (hn_id, clean_text, author, timestamp, type, parent_id). vecs: (M,768)."""
+        self.codes_f.write(
+            np.ascontiguousarray(quantize_block(vecs), dtype=np.uint8).tobytes()
+        )
         self.f16_f.write(f16_block(vecs))
         self.codes_f.flush()
         self.f16_f.flush()
         records = [(self.count + i + 1, *r) for i, r in enumerate(rows)]
         self.db.executemany(
-            "INSERT INTO doc (rowid, hn_id, clean_text, author, timestamp, type) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO doc (rowid, hn_id, clean_text, author, timestamp, type, parent_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             records,
         )
         self.db.commit()
@@ -164,8 +172,20 @@ class Progress:
         if self.total:
             pct = 100 * done / self.total
             eta = (self.total - done) / rate if rate > 0 else 0
-            msg += f" | {pct:.1f}% | ETA {eta/60:.0f}m"
+            msg += f" | {pct:.1f}% | ETA {eta / 60:.0f}m"
         print(msg, file=sys.stderr, flush=True)
+
+
+def _row_parent_id(r) -> str | None:
+    """Older embedded parquet files predate the parent column; missing/NaN
+    parent just means no parent_id, not an error."""
+    parent = getattr(r, "parent", None)
+    if parent is None:
+        return None
+    try:
+        return str(int(parent))
+    except (TypeError, ValueError):
+        return None
 
 
 def dump_parquet(writer: ArtifactWriter, glob: str, limit: int | None, batch: int):
@@ -189,7 +209,14 @@ def dump_parquet(writer: ArtifactWriter, glob: str, limit: int | None, batch: in
             if limit is not None:
                 chunk = chunk.iloc[: limit - writer.count]
             rows = [
-                (str(r.id), r.clean_text, str(r.author), str(r.timestamp), str(r.type))
+                (
+                    str(r.id),
+                    r.clean_text,
+                    str(r.author),
+                    str(r.timestamp),
+                    str(r.type),
+                    _row_parent_id(r),
+                )
                 for r in chunk.itertuples()
             ]
             vecs = np.vstack([to_vec(e) for e in chunk["embedding"]])
@@ -203,7 +230,11 @@ def main():
     ap.add_argument("--glob", default="data/embedded/*.parquet")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--batch", type=int, default=20000)
-    ap.add_argument("--restart", action="store_true", help="Delete existing artifacts and start fresh")
+    ap.add_argument(
+        "--restart",
+        action="store_true",
+        help="Delete existing artifacts and start fresh",
+    )
     args = ap.parse_args()
 
     if args.restart:

@@ -57,7 +57,9 @@ def search_stream(query: str) -> Iterator[dict]:
     """Drives the compiled tool-calling graph, translating its per-node updates
     into typed SSE events."""
     workflow = create_agent_workflow()
-    initial_state = AgentState(messages=[], query=query, sources=[], answer="")
+    initial_state = AgentState(
+        messages=[], query=query, sources=[], parent_texts={}, answer=""
+    )
 
     try:
         yield _progress("agent", "start")

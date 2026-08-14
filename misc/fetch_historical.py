@@ -60,7 +60,7 @@ def fetch_month(client, year: int, month: int, out_dir: Path) -> Path | None:
 
     nxt_y, nxt_m = (year + 1, 1) if month == 12 else (year, month + 1)
     query = f"""
-    SELECT id, `by` AS author, `type`, text, timestamp
+    SELECT id, `by` AS author, `type`, text, timestamp, parent
     FROM `bigquery-public-data.hacker_news.full`
     WHERE dead IS NOT TRUE
       AND deleted IS NOT TRUE

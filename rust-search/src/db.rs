@@ -10,6 +10,22 @@ pub struct Doc {
     pub author: String,
     pub timestamp: String,
     pub doc_type: String,
+    pub parent_id: Option<String>,
+}
+
+/// Idempotent: cheap no-op once the column exists. `ALTER TABLE ADD COLUMN` has
+/// no `IF NOT EXISTS` in SQLite, so check `PRAGMA table_info` first — lets this
+/// run on every startup instead of needing a separate one-off migration step.
+fn ensure_parent_id_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(doc)")?;
+    let has_column = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == "parent_id");
+    if !has_column {
+        conn.execute("ALTER TABLE doc ADD COLUMN parent_id TEXT", [])?;
+    }
+    Ok(())
 }
 
 pub fn open(path: &std::path::Path) -> Result<Connection> {
@@ -17,8 +33,10 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     // Idempotent: cheap no-op if already present. Lets a direct hn_id lookup
-    // (POST /similar) avoid a full table scan without a separate migration step.
+    // (POST /similar, POST /docs) avoid a full table scan without a separate
+    // migration step.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_hn_id ON doc(hn_id)", [])?;
+    ensure_parent_id_column(&conn)?;
     Ok(conn)
 }
 
@@ -37,21 +55,24 @@ pub fn max_hn_id(conn: &Connection) -> Result<i64> {
     Ok(v.unwrap_or(0))
 }
 
+fn row_to_doc(r: &rusqlite::Row, offset: usize) -> rusqlite::Result<Doc> {
+    Ok(Doc {
+        hn_id: r.get(offset)?,
+        clean_text: r.get(offset + 1)?,
+        author: r.get(offset + 2)?,
+        timestamp: r.get(offset + 3)?,
+        doc_type: r.get(offset + 4)?,
+        parent_id: r.get(offset + 5)?,
+    })
+}
+
 /// Fetch one doc by logical row index (rowid = logical + 1).
 pub fn fetch(conn: &Connection, logical: usize) -> Result<Option<Doc>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT hn_id, clean_text, author, timestamp, type FROM doc WHERE rowid = ?1",
+        "SELECT hn_id, clean_text, author, timestamp, type, parent_id FROM doc WHERE rowid = ?1",
     )?;
     let row = stmt
-        .query_row([(logical + 1) as i64], |r| {
-            Ok(Doc {
-                hn_id: r.get(0)?,
-                clean_text: r.get(1)?,
-                author: r.get(2)?,
-                timestamp: r.get(3)?,
-                doc_type: r.get(4)?,
-            })
-        })
+        .query_row([(logical + 1) as i64], |r| row_to_doc(r, 0))
         .ok();
     Ok(row)
 }
@@ -60,24 +81,31 @@ pub fn fetch(conn: &Connection, logical: usize) -> Result<Option<Doc>> {
 /// lookup and "more like this" (POST /similar), neither of which know the rowid.
 pub fn fetch_by_hn_id(conn: &Connection, hn_id: &str) -> Result<Option<(usize, Doc)>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT rowid, hn_id, clean_text, author, timestamp, type FROM doc WHERE hn_id = ?1",
+        "SELECT rowid, hn_id, clean_text, author, timestamp, type, parent_id FROM doc WHERE hn_id = ?1",
     )?;
     let row = stmt
         .query_row([hn_id], |r| {
             let rowid: i64 = r.get(0)?;
-            Ok((
-                (rowid - 1) as usize,
-                Doc {
-                    hn_id: r.get(1)?,
-                    clean_text: r.get(2)?,
-                    author: r.get(3)?,
-                    timestamp: r.get(4)?,
-                    doc_type: r.get(5)?,
-                },
-            ))
+            Ok(((rowid - 1) as usize, row_to_doc(r, 1)?))
         })
         .ok();
     Ok(row)
+}
+
+/// Batch fetch docs by hn_id (POST /docs) — e.g. resolving a set of comments'
+/// parent_ids to their own text/author/timestamp in one round trip. Missing
+/// ids are silently skipped, not an error.
+pub fn fetch_by_hn_ids(conn: &Connection, hn_ids: &[String]) -> Result<Vec<Doc>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT hn_id, clean_text, author, timestamp, type, parent_id FROM doc WHERE hn_id = ?1",
+    )?;
+    let mut out = Vec::with_capacity(hn_ids.len());
+    for id in hn_ids {
+        if let Some(doc) = stmt.query_row([id], |r| row_to_doc(r, 0)).ok() {
+            out.push(doc);
+        }
+    }
+    Ok(out)
 }
 
 /// Which of the given hn_ids already exist (for append dedup).
@@ -98,8 +126,8 @@ pub fn insert_tail(conn: &mut Connection, start_rowid: i64, docs: &[Doc]) -> Res
     let tx = conn.transaction()?;
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO doc (rowid, hn_id, clean_text, author, timestamp, type) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO doc (rowid, hn_id, clean_text, author, timestamp, type, parent_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for (i, d) in docs.iter().enumerate() {
             stmt.execute(rusqlite::params![
@@ -109,6 +137,7 @@ pub fn insert_tail(conn: &mut Connection, start_rowid: i64, docs: &[Doc]) -> Res
                 d.author,
                 d.timestamp,
                 d.doc_type,
+                d.parent_id,
             ])?;
         }
     }

@@ -58,13 +58,20 @@ def results_to_cache_data(results: list[SearchResult]) -> list[SearchResult]:
     ]
 
 
-def build_context(search_results: list[SearchResult]) -> str:
-    return "\n\n---\n\n".join(
-        [
-            f"[{i + 1}] Author: {r['author']} ({r['timestamp']})\nLink: https://news.ycombinator.com/item?id={r['id']}\n{r['text']}"
-            for i, r in enumerate(search_results)
-        ]
-    )
+def build_context(
+    search_results: list[SearchResult], parent_texts: dict[str, str] | None = None
+) -> str:
+    parent_texts = parent_texts or {}
+    blocks = []
+    for i, r in enumerate(search_results):
+        parent = parent_texts.get(r["id"])
+        reply_to = f"In reply to: {parent}\n\n" if parent else ""
+        blocks.append(
+            f"[{i + 1}] Author: {r['author']} ({r['timestamp']})\n"
+            f"Link: https://news.ycombinator.com/item?id={r['id']}\n"
+            f"{reply_to}{r['text']}"
+        )
+    return "\n\n---\n\n".join(blocks)
 
 
 def build_prompt(query: str, context: str) -> str:

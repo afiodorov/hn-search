@@ -129,7 +129,7 @@ def fetch_from_bigquery(
     print(f"💰 Using GCP project: {client.project}")
 
     query = f"""
-    SELECT id, `by` AS author, `type`, text, timestamp
+    SELECT id, `by` AS author, `type`, text, timestamp, parent
     FROM `bigquery-public-data.hacker_news.full`
     WHERE dead IS NOT TRUE AND deleted IS NOT TRUE AND text IS NOT NULL
       AND type = 'comment' AND id > {min_id}
@@ -256,6 +256,9 @@ def append_to_rust(df, batch_size=1000) -> int:
                 "timestamp": str(row["timestamp"]),
                 "type": str(row["type"]),
                 "embedding": [float(x) for x in row["embedding"]],
+                "parent_id": str(int(row["parent"]))
+                if "parent" in row and pd.notna(row["parent"])
+                else None,
             }
             for _, row in chunk.iterrows()
         ]

@@ -9,13 +9,15 @@ instruction (verified empirically: an earlier prompt asked for verbatim-only
 search and the model rewrote it anyway, drifting retrieval away from legacy
 behavior — see eval_judge history). So a plain verbatim semantic_search on the
 user's exact question always runs too, deterministically, outside the LLM's
-control. gather_sources fuses all result lists by rank (RRF) and caps the pool,
-and synthesize_answer drafts the final cited answer from the combined set.
+control. gather_sources fuses all result lists by rank (RRF), caps the pool, and
+resolves each source's parent comment (best-effort — most of the corpus predates
+the parent_id backfill) so a short reply that's uninterpretable on its own gets
+context; synthesize_answer drafts the final cited answer from the combined set.
 
 Still single-hop for the planner (it can request 1+ tool calls in one turn, which
 ToolNode runs together, but the graph doesn't loop back to the planner after) — a
 real multi-turn loop is a later step, for when a tool's result needs to inform a
-*subsequent* tool choice (e.g. thread context once parent/child data exists).
+*subsequent* tool choice.
 """
 
 import json
@@ -29,6 +31,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from hn_search.cache_config import cache_answer, get_cached_answer
 from hn_search.logging_config import get_logger
+from hn_search.search_backend import get_docs
 
 from .nodes import build_context, build_prompt, make_llm
 from .state import SearchResult
@@ -47,6 +50,9 @@ _MAX_SOURCES = 12
 # influence of any single list's exact rank so cross-list consensus matters more
 # than any one query embedding's raw distance scale.
 _RRF_K = 60
+# Cap how much of a parent comment's text gets pulled into the prompt — enough
+# for it to give context, not so much a single long thread derails the budget.
+_PARENT_TEXT_MAX_CHARS = 600
 
 
 def _reciprocal_rank_fusion(
@@ -98,6 +104,7 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     query: str
     sources: list[SearchResult]
+    parent_texts: dict[str, str]
     answer: str
 
 
@@ -133,6 +140,49 @@ def _agent_time_bounds(messages: list) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _fetch_parent_texts(sources: list[SearchResult]) -> dict[str, str]:
+    """For each source, resolve its parent comment's own text — a short reply
+    ("I agree", "this is wrong") is often uninterpretable without knowing what
+    it's replying to (validated empirically: adding this surfaced a genuinely
+    new cited point the baseline had silently skipped for exactly this reason).
+    Two batched round trips: each source's own parent_id, then the parents'
+    text. Best-effort — any failure (including comments that predate the
+    parent_id backfill and simply have none) just yields no parent context for
+    that source, not an error."""
+    if not sources:
+        return {}
+    try:
+        own_docs = get_docs([s["id"] for s in sources])
+    except Exception:
+        logger.exception("parent-context lookup failed (own docs)")
+        return {}
+
+    parent_ids = set()
+    for s in sources:
+        pid = own_docs.get(s["id"], {}).get("parent_id")
+        if pid:
+            parent_ids.add(pid)
+    if not parent_ids:
+        return {}
+
+    try:
+        parent_docs = get_docs(list(parent_ids))
+    except Exception:
+        logger.exception("parent-context lookup failed (parent docs)")
+        return {}
+
+    result = {}
+    for s in sources:
+        pid = own_docs.get(s["id"], {}).get("parent_id")
+        parent_doc = parent_docs.get(pid) if pid else None
+        if parent_doc:
+            text = parent_doc["clean_text"]
+            if len(text) > _PARENT_TEXT_MAX_CHARS:
+                text = text[:_PARENT_TEXT_MAX_CHARS] + "…"
+            result[s["id"]] = text
+    return result
+
+
 def _gather_sources(state: AgentState) -> AgentState:
     """Run the guaranteed verbatim baseline search, then fuse it by rank (RRF)
     with whatever the planner agent additionally searched for."""
@@ -158,13 +208,14 @@ def _gather_sources(state: AgentState) -> AgentState:
             agent_result_lists.append(content)
 
     merged = _reciprocal_rank_fusion([verbatim_results, *agent_result_lists])
+    parent_texts = _fetch_parent_texts(merged)
 
-    return {**state, "sources": merged}
+    return {**state, "sources": merged, "parent_texts": parent_texts}
 
 
 def _synthesize_answer(state: AgentState) -> AgentState:
     query = state["query"]
-    context = build_context(state["sources"])
+    context = build_context(state["sources"], state["parent_texts"])
 
     cached_answer = get_cached_answer(query, context)
     if cached_answer:

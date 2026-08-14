@@ -6,7 +6,8 @@
 //!   GET  /health  -> "ok"
 //!   POST /search  {embedding:[f32;768], k?, shortlist?, time_after?, time_before?} -> [SearchHit]
 //!   POST /similar {hn_id, k?} -> [SearchHit]  (reuses the doc's own stored vector)
-//!   POST /append  {rows:[{hn_id, clean_text, author, timestamp, type, embedding}]}
+//!   POST /docs    {hn_ids:[...]} -> [DocHit]  (batch text/metadata lookup, e.g. resolving parent_ids)
+//!   POST /append  {rows:[{hn_id, clean_text, author, timestamp, type, embedding, parent_id?}]}
 //!   GET  /max_id  -> {max_id}
 
 mod db;
@@ -58,6 +59,11 @@ struct SimilarReq {
     k: Option<usize>,
 }
 
+#[derive(Deserialize)]
+struct DocsReq {
+    hn_ids: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct SearchHit {
     id: String,
@@ -69,6 +75,17 @@ struct SearchHit {
     distance: f32,
 }
 
+#[derive(Serialize)]
+struct DocHit {
+    id: String,
+    clean_text: String,
+    author: String,
+    timestamp: String,
+    #[serde(rename = "type")]
+    doc_type: String,
+    parent_id: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct AppendRow {
     hn_id: String,
@@ -78,6 +95,8 @@ struct AppendRow {
     #[serde(rename = "type")]
     doc_type: String,
     embedding: Vec<f32>,
+    #[serde(default)]
+    parent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -266,6 +285,35 @@ async fn similar(
     }
 }
 
+async fn docs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<DocsReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_read(&state, &headers)?;
+
+    let hits = tokio::task::spawn_blocking(move || -> Result<Vec<DocHit>, String> {
+        let conn = state.db.lock().unwrap();
+        let found = db::fetch_by_hn_ids(&conn, &req.hn_ids).map_err(|e| e.to_string())?;
+        Ok(found
+            .into_iter()
+            .map(|d| DocHit {
+                id: d.hn_id,
+                clean_text: d.clean_text,
+                author: d.author,
+                timestamp: d.timestamp,
+                doc_type: d.doc_type,
+                parent_id: d.parent_id,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(hits))
+}
+
 async fn append(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -306,6 +354,7 @@ async fn append(
                 author: r.author,
                 timestamp: r.timestamp,
                 doc_type: r.doc_type,
+                parent_id: r.parent_id,
             });
             vecs.push(r.embedding);
         }
@@ -379,6 +428,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/search", post(search))
         .route("/similar", post(similar))
+        .route("/docs", post(docs))
         // axum defaults request bodies to 2MB; /append batches are several MB of
         // JSON embeddings, so lift the cap to match Caddy's 64MB.
         .route(

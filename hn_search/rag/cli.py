@@ -17,7 +17,9 @@ def main():
 
     app = create_agent_workflow()
 
-    initial_state = AgentState(messages=[], query=args.query, sources=[], answer="")
+    initial_state = AgentState(
+        messages=[], query=args.query, sources=[], parent_texts={}, answer=""
+    )
 
     try:
         final_state = app.invoke(initial_state)
