@@ -15,8 +15,9 @@ keys look like, so this is usually not an issue — but for a fully clean run,
 flush the relevant Redis first.
 
 Usage:
-    uv run python misc/eval_judge.py
-    uv run python misc/eval_judge.py --eval-file evals/production_queries.jsonl --limit 10
+    uv run python misc/eval_judge.py                    # replays against the agentic pipeline
+    uv run python misc/eval_judge.py --engine legacy     # sanity-check against the old pipeline
+    uv run python misc/eval_judge.py --limit 1           # cheap smoke test
 """
 
 import argparse
@@ -26,7 +27,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hn_search.rag.nodes import make_llm
-from hn_search.rag.pipeline import search_stream
+from hn_search.rag.pipeline import search_stream, search_stream_agentic
+
+_ENGINES = {"legacy": search_stream, "agentic": search_stream_agentic}
 
 JUDGE_PROMPT = """You are grading whether two answers to the same question are \
 substantively equivalent, for regression-testing a Hacker News search/RAG system \
@@ -50,11 +53,11 @@ Respond with strict JSON and nothing else:
 {{"verdict": "PASS" or "FLAG", "reasoning": "<one or two sentences>"}}"""
 
 
-def run_query(query: str) -> tuple[str, list[str]]:
-    """Drain search_stream for a query, returning (answer, source_ids)."""
+def run_query(query: str, engine) -> tuple[str, list[str]]:
+    """Drain the given search_stream-shaped generator, returning (answer, source_ids)."""
     answer = ""
     source_ids: list[str] = []
-    for event in search_stream(query):
+    for event in engine(query):
         if event["type"] == "sources":
             source_ids = [s["id"] for s in event["sources"]]
         elif event["type"] == "answer":
@@ -76,14 +79,19 @@ def judge(llm, query: str, baseline_answer: str, new_answer: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return {"verdict": "FLAG", "reasoning": f"unparseable judge response: {text[:200]}"}
+        return {
+            "verdict": "FLAG",
+            "reasoning": f"unparseable judge response: {text[:200]}",
+        }
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval-file", default="evals/production_queries.jsonl")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--engine", choices=_ENGINES, default="agentic")
     args = parser.parse_args()
+    engine = _ENGINES[args.engine]
 
     records = []
     with open(args.eval_file) as f:
@@ -103,7 +111,7 @@ def main():
         baseline_sources = set(r.get("source_ids", []))
 
         try:
-            new_answer, new_source_ids = run_query(query)
+            new_answer, new_source_ids = run_query(query, engine)
         except Exception as e:
             print(f"[ERROR] {query[:60]!r}: {e}")
             results.append({"query": query, "verdict": "ERROR", "reasoning": str(e)})
@@ -122,14 +130,14 @@ def main():
                 "source_overlap": round(overlap, 2),
             }
         )
-        print(
-            f"[{verdict['verdict']}] {query[:60]!r} (source overlap {overlap:.0%})"
-        )
+        print(f"[{verdict['verdict']}] {query[:60]!r} (source overlap {overlap:.0%})")
         if verdict["verdict"] != "PASS":
             print(f"    {verdict['reasoning']}")
 
     flagged = [r for r in results if r["verdict"] != "PASS"]
-    print(f"\n{len(results) - len(flagged)}/{len(results)} PASS, {len(flagged)} flagged")
+    print(
+        f"\n{len(results) - len(flagged)}/{len(results)} PASS, {len(flagged)} flagged"
+    )
 
     report_dir = Path("evals/reports")
     report_dir.mkdir(parents=True, exist_ok=True)

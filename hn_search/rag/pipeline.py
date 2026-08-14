@@ -25,6 +25,7 @@ from hn_search.common import get_model
 from hn_search.logging_config import get_logger
 from hn_search.search_backend import search
 
+from .agent import create_agent_workflow
 from .nodes import (
     build_context,
     build_prompt,
@@ -143,4 +144,57 @@ def search_stream(query: str, n_results: int = 10) -> Iterator[dict]:
         yield {"type": "answer", "text": answer}
     except Exception as e:
         logger.exception(f"LLM error: {e}")
+        yield {"type": "error", "message": str(e)}
+
+
+_NODE_LABELS = {
+    "agent": "Planning search",
+    "tools": _SEARCH_LABEL,
+    "extract_sources": "Collecting sources",
+    "synthesize_answer": "Asking DeepSeek",
+}
+
+
+def search_stream_agentic(query: str) -> Iterator[dict]:
+    """Stage-1 agentic pipeline: drives the compiled tool-calling graph, translating
+    its per-node updates into the same SSE event contract as search_stream()."""
+    workflow = create_agent_workflow()
+    initial_state = {"messages": [], "query": query, "sources": [], "answer": ""}
+
+    try:
+        t0 = time.perf_counter()
+        for update in workflow.stream(initial_state, stream_mode="updates"):
+            for node_name, delta in update.items():
+                ms = round((time.perf_counter() - t0) * 1000)
+                t0 = time.perf_counter()
+                label = _NODE_LABELS.get(node_name, node_name)
+                logger.info(f"⏱️ {label}: {ms}ms")
+                yield {
+                    "type": "progress",
+                    "step": node_name,
+                    "label": label,
+                    "status": "done",
+                    "ms": ms,
+                    "hit": None,
+                }
+
+                if node_name == "extract_sources":
+                    sources = delta.get("sources", [])
+                    logger.info(f"✅ Found {len(sources)} relevant comments/articles")
+                    yield {
+                        "type": "sources",
+                        "sources": [
+                            {
+                                **s,
+                                "url": f"https://news.ycombinator.com/item?id={s['id']}",
+                            }
+                            for s in sources
+                        ],
+                    }
+                elif node_name == "synthesize_answer":
+                    answer = delta.get("answer", "")
+                    yield {"type": "token", "text": answer}
+                    yield {"type": "answer", "text": answer}
+    except Exception as e:
+        logger.exception(f"Agentic pipeline error: {e}")
         yield {"type": "error", "message": str(e)}

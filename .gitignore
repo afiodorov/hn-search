@@ -219,3 +219,6 @@ __marimo__/
 
 data/
 node_modules/
+
+# eval_judge.py run reports (ephemeral, not the versioned eval set itself)
+evals/reports/
