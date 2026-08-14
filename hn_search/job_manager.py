@@ -146,6 +146,28 @@ class JobManager:
         except Exception:
             return None
 
+    def log_eval_record(self, query: str, sources: list, answer: str):
+        """Append a query/sources/answer record to the durable eval log.
+
+        Separate from the 12h job-result cache: this is meant to accumulate real
+        production queries as an eval set, so it's capped by count (not TTL) and
+        kept independently of RESULT_CACHE_TTL.
+        """
+        if not self.redis:
+            return
+
+        try:
+            record = {
+                "query": query,
+                "source_ids": [s.get("id") for s in sources],
+                "answer": answer,
+                "ts": time.time(),
+            }
+            self.redis.rpush("eval:log", json.dumps(record))
+            self.redis.ltrim("eval:log", -20000, -1)
+        except Exception as e:
+            logger.exception(f"⚠️ Error logging eval record: {e}")
+
     def track_recent_query(self, query: str):
         """Track query in recent queries sorted set."""
         if not self.redis:

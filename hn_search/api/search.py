@@ -77,6 +77,7 @@ def _process(query: str, job_id: str):
             yield _sse(event)
 
         job_manager.store_result(job_id, {"answer": answer, "sources": sources})
+        job_manager.log_eval_record(query, sources, answer)
         yield _done()
     except Exception as e:
         logger.exception(f"Search failed for: {query}")
