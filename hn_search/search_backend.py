@@ -5,6 +5,7 @@ column order callers expect (`id, clean_text, author, timestamp, type, distance`
 results flow straight through `rows_to_results`.
 """
 
+import functools
 import os
 
 from hn_search.logging_config import get_logger
@@ -20,24 +21,20 @@ def _to_list(embedding) -> list[float]:
     return embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
 
 
-# Persistent keep-alive client: reuse one TCP+TLS connection across queries so the
-# handshake (costly over the cross-datacenter hop) is paid once, not per request.
-_client = None
-
-
+@functools.cache
 def _get_client():
-    global _client
-    if _client is None:
-        import httpx
+    """Persistent keep-alive client: reuse one TCP+TLS connection across queries
+    so the handshake (costly over the cross-datacenter hop) is paid once, not
+    per request."""
+    import httpx
 
-        headers = {"Authorization": f"Bearer {RUST_TOKEN}"} if RUST_TOKEN else {}
-        _client = httpx.Client(
-            base_url=RUST_URL,
-            headers=headers,
-            timeout=RUST_TIMEOUT,
-            limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=60),
-        )
-    return _client
+    headers = {"Authorization": f"Bearer {RUST_TOKEN}"} if RUST_TOKEN else {}
+    return httpx.Client(
+        base_url=RUST_URL,
+        headers=headers,
+        timeout=RUST_TIMEOUT,
+        limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=60),
+    )
 
 
 def _rows(hits: list[dict]) -> list[tuple]:

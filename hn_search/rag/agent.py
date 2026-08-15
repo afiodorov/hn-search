@@ -37,6 +37,7 @@ real multi-turn loop is a later step, for when a tool's result needs to inform a
 *subsequent* tool choice.
 """
 
+import functools
 import json
 from datetime import datetime, timezone
 from typing import Annotated, TypedDict, cast
@@ -319,29 +320,25 @@ def _synthesize_answer(state: AgentState) -> AgentState:
     return {**state, "answer": answer}
 
 
-_compiled_agent_workflow = None
-
-
+@functools.cache
 def create_agent_workflow():
     """Get or create the singleton compiled agentic workflow."""
-    global _compiled_agent_workflow
-    if _compiled_agent_workflow is None:
-        logger.info("🔧 Compiling agentic RAG workflow...")
-        workflow = StateGraph(AgentState)
+    logger.info("🔧 Compiling agentic RAG workflow...")
+    workflow = StateGraph(AgentState)
 
-        workflow.add_node("agent", _agent_node)
-        workflow.add_node("tools", ToolNode(_TOOLS))
-        workflow.add_node("gather_sources", _gather_sources)
-        workflow.add_node("synthesize_answer", _synthesize_answer)
+    workflow.add_node("agent", _agent_node)
+    workflow.add_node("tools", ToolNode(_TOOLS))
+    workflow.add_node("gather_sources", _gather_sources)
+    workflow.add_node("synthesize_answer", _synthesize_answer)
 
-        workflow.set_entry_point("agent")
-        workflow.add_conditional_edges(
-            "agent", tools_condition, {"tools": "tools", END: "gather_sources"}
-        )
-        workflow.add_edge("tools", "gather_sources")
-        workflow.add_edge("gather_sources", "synthesize_answer")
-        workflow.add_edge("synthesize_answer", END)
+    workflow.set_entry_point("agent")
+    workflow.add_conditional_edges(
+        "agent", tools_condition, {"tools": "tools", END: "gather_sources"}
+    )
+    workflow.add_edge("tools", "gather_sources")
+    workflow.add_edge("gather_sources", "synthesize_answer")
+    workflow.add_edge("synthesize_answer", END)
 
-        _compiled_agent_workflow = workflow.compile()
-        logger.info("✅ Agentic RAG workflow compiled")
-    return _compiled_agent_workflow
+    compiled = workflow.compile()
+    logger.info("✅ Agentic RAG workflow compiled")
+    return compiled

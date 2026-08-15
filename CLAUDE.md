@@ -124,6 +124,10 @@ ARTIFACT_DIR=./artifacts PORT=8001 HN_SEARCH_TOKEN=dev ./target/release/rust-sea
 
 - Format/lint: `make format`, `make lint` (ruff). Line length 88, target py313.
 - Type checking: `make typecheck` (pyright, `basic` mode; needs `uv sync --extra dev`).
+- No bare `global` for lazy module-level singletons (an encoder, a compiled
+  graph, an HTTP client) — decorate the getter with `@functools.cache` instead.
+  Same lazy-init-once behavior, no manual `if x is None` check, and it works
+  identically whether the module's called from the API, the CLI, or a script.
 - Auth is **disabled** when no token env is set (local dev only).
 - RAG regression check: `uv run python misc/eval_judge.py` replays
   `evals/production_queries.jsonl` (real logged queries, see `job_manager.py`'s

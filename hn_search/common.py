@@ -15,6 +15,7 @@ HN_ONNX_MODEL_FILE — defaults to fp32 (exact); on ARM hosts (Oracle/Hetzner)
 "onnx/model_qint8_arm64.onnx" is smaller/faster with negligible drift.
 """
 
+import functools
 import os
 
 import numpy as np
@@ -28,9 +29,6 @@ ONNX_MODEL_FILE = os.getenv("HN_ONNX_MODEL_FILE", "onnx/model.onnx")
 MAX_SEQ_LENGTH = int(os.getenv("HN_EMBED_MAX_LEN", "384"))
 
 logger = get_logger(__name__)
-
-# Singleton encoder (loaded once, reused across requests)
-_encoder = None
 
 
 class OnnxEncoder:
@@ -97,9 +95,7 @@ class OnnxEncoder:
         return embeddings.astype(np.float32)
 
 
+@functools.cache
 def get_model() -> OnnxEncoder:
     """Get or create the singleton ONNX query encoder."""
-    global _encoder
-    if _encoder is None:
-        _encoder = OnnxEncoder()
-    return _encoder
+    return OnnxEncoder()
