@@ -22,11 +22,14 @@ backfill) so a short reply that's uninterpretable on its own gets context;
 synthesize_answer drafts the final cited answer from the combined set.
 
 The planner's tool-call decisions are captured into `AgentState["tool_calls"]`
-the moment they're made (mirroring `response.tool_calls`), rather than having
-every downstream node re-derive "what did the planner decide" by re-walking
-`messages` — `messages` stays LangGraph's carrier for LLM conversational
-history (`ToolNode` needs it in that shape), it just isn't pressed into service
-as the only record of planner decisions too.
+the moment they're made (mirroring `response.tool_calls`), and any facts
+derived from them (e.g. `time_after`/`time_before`, for propagating a date
+filter onto the guaranteed baseline) are computed once in the same node and
+stored as their own state fields too — rather than having every downstream
+node re-derive "what did the planner decide" by re-walking `messages` or
+re-parsing `tool_calls` each time it's needed. `messages` stays LangGraph's
+carrier for LLM conversational history (`ToolNode` needs it in that shape),
+it just isn't pressed into service as the only record of planner decisions.
 
 Still single-hop for the planner (it can request 1+ tool calls in one turn, which
 ToolNode runs together, but the graph doesn't loop back to the planner after) — a
@@ -118,6 +121,8 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     query: str
     tool_calls: list[dict]
+    time_after: str | None
+    time_before: str | None
     sources: list[SearchResult]
     parent_texts: dict[str, str]
     answer: str
@@ -139,10 +144,13 @@ def _agent_node(state: AgentState) -> AgentState:
     # .invoke()'s static return type is the generic BaseMessage; tool_calls is
     # only on AIMessage, which is what a tool-bound chat model always returns.
     tool_calls = getattr(response, "tool_calls", None) or []
+    time_after, time_before = _agent_time_bounds(tool_calls)
     return {
         **state,
         "messages": messages + [response],
         "tool_calls": tool_calls,
+        "time_after": time_after,
+        "time_before": time_before,
     }
 
 
@@ -212,6 +220,39 @@ def _run_baseline_search(
     )
 
 
+def _fetch_referenced_docs(tool_calls: list[dict]) -> list[SearchResult]:
+    """similar_comments deliberately excludes the referenced comment from its
+    own results (it reuses that comment's embedding to find *other* similar
+    ones) — correct for retrieval, but it means synthesis never sees the exact
+    comment the user asked about, only comments around it (confirmed: DeepSeek
+    noticed the gap and said as much in an answer). Fetch it directly and feed
+    it in as its own rank-1 result list, so it merges in like any other source
+    and becomes a normal numbered citation instead of a silent omission."""
+    ids = [
+        tc["args"]["hn_id"]
+        for tc in tool_calls
+        if tc["name"] == "similar_comments" and tc.get("args", {}).get("hn_id")
+    ]
+    if not ids:
+        return []
+    try:
+        docs = get_docs(ids)
+    except Exception:
+        logger.exception("referenced-comment lookup failed")
+        return []
+    return [
+        SearchResult(
+            id=d["id"],
+            author=d["author"],
+            type=d["type"],
+            text=d["clean_text"],
+            timestamp=d["timestamp"],
+            distance=0.0,
+        )
+        for d in docs.values()
+    ]
+
+
 def _gather_sources(state: AgentState) -> AgentState:
     """Run the guaranteed verbatim baseline search, then fuse it by rank (RRF)
     with whatever the planner agent additionally searched for.
@@ -222,10 +263,12 @@ def _gather_sources(state: AgentState) -> AgentState:
     mention a URL, not comments related to the linked one — that then pollutes
     the RRF-fused result via similar_comments' own, correct results. Skipping
     is a fixed rule keyed off state (state["tool_calls"]), not a judgment call
-    handed back to the LLM.
+    handed back to the LLM. When similar_comments fires, the referenced
+    comment's own text is fetched and merged in too (see
+    _fetch_referenced_docs) so synthesis has it, not just its neighbors.
     """
     tool_calls = state["tool_calls"]
-    time_after, time_before = _agent_time_bounds(tool_calls)
+    time_after, time_before = state["time_after"], state["time_before"]
     used_similar = any(tc["name"] == "similar_comments" for tc in tool_calls)
 
     verbatim_results: list[SearchResult] = (
@@ -233,6 +276,7 @@ def _gather_sources(state: AgentState) -> AgentState:
         if used_similar
         else _run_baseline_search(state["query"], time_after, time_before)
     )
+    referenced_results = _fetch_referenced_docs(tool_calls) if used_similar else []
 
     agent_result_lists: list[list[SearchResult]] = []
     for m in state["messages"]:
@@ -245,7 +289,9 @@ def _gather_sources(state: AgentState) -> AgentState:
                     content = []
             agent_result_lists.append(content)
 
-    merged = _reciprocal_rank_fusion([verbatim_results, *agent_result_lists])
+    merged = _reciprocal_rank_fusion(
+        [referenced_results, verbatim_results, *agent_result_lists]
+    )
     if not merged:
         # Safety net: skipping the baseline (or the planner's own tool calls
         # returning nothing) must never leave us with zero sources.

@@ -21,6 +21,8 @@ def main():
         messages=[],
         query=args.query,
         tool_calls=[],
+        time_after=None,
+        time_before=None,
         sources=[],
         parent_texts={},
         answer="",

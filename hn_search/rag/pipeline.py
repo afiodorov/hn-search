@@ -61,6 +61,8 @@ def search_stream(query: str) -> Iterator[dict]:
         messages=[],
         query=query,
         tool_calls=[],
+        time_after=None,
+        time_before=None,
         sources=[],
         parent_texts={},
         answer="",
