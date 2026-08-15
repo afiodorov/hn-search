@@ -58,7 +58,12 @@ def search_stream(query: str) -> Iterator[dict]:
     into typed SSE events."""
     workflow = create_agent_workflow()
     initial_state = AgentState(
-        messages=[], query=query, sources=[], parent_texts={}, answer=""
+        messages=[],
+        query=query,
+        tool_calls=[],
+        sources=[],
+        parent_texts={},
+        answer="",
     )
 
     try:

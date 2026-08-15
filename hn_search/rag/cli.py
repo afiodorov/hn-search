@@ -18,7 +18,12 @@ def main():
     app = create_agent_workflow()
 
     initial_state = AgentState(
-        messages=[], query=args.query, sources=[], parent_texts={}, answer=""
+        messages=[],
+        query=args.query,
+        tool_calls=[],
+        sources=[],
+        parent_texts={},
+        answer="",
     )
 
     try:

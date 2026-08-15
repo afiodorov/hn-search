@@ -9,10 +9,24 @@ instruction (verified empirically: an earlier prompt asked for verbatim-only
 search and the model rewrote it anyway, drifting retrieval away from legacy
 behavior — see eval_judge history). So a plain verbatim semantic_search on the
 user's exact question always runs too, deterministically, outside the LLM's
-control. gather_sources fuses all result lists by rank (RRF), caps the pool, and
-resolves each source's parent comment (best-effort — most of the corpus predates
-the parent_id backfill) so a short reply that's uninterpretable on its own gets
-context; synthesize_answer drafts the final cited answer from the combined set.
+control — *except* when the planner called similar_comments, in which case the
+baseline is redundant by construction (the id-based lookup already covers what
+the link/id was pointing at) and skipping it is itself a fixed, code-level rule
+keyed off state, not a new judgment call handed to the LLM: verbatim-embedding a
+query that's mostly a pasted HN link produces junk (comments that merely
+*mention* a URL, not comments related to the linked one), and that junk was
+getting RRF-fused right in with the good similar_comments results. gather_sources
+fuses all result lists by rank (RRF), caps the pool, and resolves each source's
+parent comment (best-effort — most of the corpus predates the parent_id
+backfill) so a short reply that's uninterpretable on its own gets context;
+synthesize_answer drafts the final cited answer from the combined set.
+
+The planner's tool-call decisions are captured into `AgentState["tool_calls"]`
+the moment they're made (mirroring `response.tool_calls`), rather than having
+every downstream node re-derive "what did the planner decide" by re-walking
+`messages` — `messages` stays LangGraph's carrier for LLM conversational
+history (`ToolNode` needs it in that shape), it just isn't pressed into service
+as the only record of planner decisions too.
 
 Still single-hop for the planner (it can request 1+ tool calls in one turn, which
 ToolNode runs together, but the graph doesn't loop back to the planner after) — a
@@ -103,6 +117,7 @@ _SYSTEM_PROMPT = (
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     query: str
+    tool_calls: list[dict]
     sources: list[SearchResult]
     parent_texts: dict[str, str]
     answer: str
@@ -121,22 +136,28 @@ def _agent_node(state: AgentState) -> AgentState:
     # snapshot against — only the final answer's prose needs variety.
     llm = make_llm(temperature=0).bind_tools(_TOOLS)
     response = llm.invoke(messages)
-    return {**state, "messages": messages + [response]}
+    # .invoke()'s static return type is the generic BaseMessage; tool_calls is
+    # only on AIMessage, which is what a tool-bound chat model always returns.
+    tool_calls = getattr(response, "tool_calls", None) or []
+    return {
+        **state,
+        "messages": messages + [response],
+        "tool_calls": tool_calls,
+    }
 
 
-def _agent_time_bounds(messages: list) -> tuple[str | None, str | None]:
+def _agent_time_bounds(tool_calls: list[dict]) -> tuple[str | None, str | None]:
     """If the planner applied a date filter to any of its own searches, the
     guaranteed baseline search should respect it too — otherwise an unfiltered
     baseline leaks stale results back into a deliberately date-scoped query via
     RRF fusion, defeating the point of the filter. Takes the first bound found;
     in practice the planner applies the same window to every call it makes for
     one query."""
-    for m in messages:
-        for tc in getattr(m, "tool_calls", None) or []:
-            args = tc.get("args", {})
-            after, before = args.get("time_after"), args.get("time_before")
-            if after or before:
-                return after, before
+    for tc in tool_calls:
+        args = tc.get("args", {})
+        after, before = args.get("time_after"), args.get("time_before")
+        if after or before:
+            return after, before
     return None, None
 
 
@@ -183,17 +204,34 @@ def _fetch_parent_texts(sources: list[SearchResult]) -> dict[str, str]:
     return result
 
 
+def _run_baseline_search(
+    query: str, time_after: str | None, time_before: str | None
+) -> list[SearchResult]:
+    return semantic_search.invoke(
+        {"query": query, "k": _DEFAULT_K, "time_after": time_after, "time_before": time_before}
+    )
+
+
 def _gather_sources(state: AgentState) -> AgentState:
     """Run the guaranteed verbatim baseline search, then fuse it by rank (RRF)
-    with whatever the planner agent additionally searched for."""
-    time_after, time_before = _agent_time_bounds(state["messages"])
-    verbatim_results = semantic_search.invoke(
-        {
-            "query": state["query"],
-            "k": _DEFAULT_K,
-            "time_after": time_after,
-            "time_before": time_before,
-        }
+    with whatever the planner agent additionally searched for.
+
+    The baseline is skipped when the planner called similar_comments: the
+    baseline would embed the user's raw text (often mostly a pasted HN link) as
+    if it were a search query, which produces junk — comments that merely
+    mention a URL, not comments related to the linked one — that then pollutes
+    the RRF-fused result via similar_comments' own, correct results. Skipping
+    is a fixed rule keyed off state (state["tool_calls"]), not a judgment call
+    handed back to the LLM.
+    """
+    tool_calls = state["tool_calls"]
+    time_after, time_before = _agent_time_bounds(tool_calls)
+    used_similar = any(tc["name"] == "similar_comments" for tc in tool_calls)
+
+    verbatim_results: list[SearchResult] = (
+        []
+        if used_similar
+        else _run_baseline_search(state["query"], time_after, time_before)
     )
 
     agent_result_lists: list[list[SearchResult]] = []
@@ -208,6 +246,12 @@ def _gather_sources(state: AgentState) -> AgentState:
             agent_result_lists.append(content)
 
     merged = _reciprocal_rank_fusion([verbatim_results, *agent_result_lists])
+    if not merged:
+        # Safety net: skipping the baseline (or the planner's own tool calls
+        # returning nothing) must never leave us with zero sources.
+        merged = _reciprocal_rank_fusion(
+            [_run_baseline_search(state["query"], time_after, time_before)]
+        )
     parent_texts = _fetch_parent_texts(merged)
 
     return {**state, "sources": merged, "parent_texts": parent_texts}
