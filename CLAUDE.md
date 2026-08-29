@@ -121,7 +121,14 @@ changes to the updater don't propagate automatically — re-rsync `./` to
 `/root/hn-search/` to update it.** UI: `https://167.233.115.172.sslip.io:8443`
 (Caddy block → 127.0.0.1:8080, ufw allows 8443), behind Caddy basic-auth **and** the
 Airflow login (SimpleAuthManager admin password in
-`/root/airflow/simple_auth_manager_passwords.json.generated`).
+`/root/airflow/simple_auth_manager_passwords.json.generated`). Metadata DB is
+local Postgres (`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` in `/root/airflow/airflow.env`;
+`airflow.cfg` still says sqlite, so source `airflow.env` before any `airflow` CLI call
+or it looks at an empty DB). **`airflow standalone` doesn't restart its children**: if
+Postgres bounces (unattended-upgrades did this on 2026-08-22) the scheduler exits, the
+api-server keeps the unit "active", and nothing schedules. A systemd timer
+`airflow-watchdog.timer` (every 5 min → `/usr/local/bin/airflow-watchdog`) runs
+`airflow jobs check --job-type SchedulerJob` and restarts `airflow` when it fails.
 
 **Full rebuild** (rare): `make fetch` → `make embed` (on a GPU box) → `make artifacts`
 → `rsync_artifacts.sh`. See README.
