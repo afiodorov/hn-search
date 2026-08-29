@@ -55,6 +55,18 @@ The daily updater batches at 1000 rows (~10 MB), comfortably under 64 MB.
 
 - **Host**: `root@167.233.115.172`, public URL `https://167.233.115.172.sslip.io`
   (sslip.io maps the IP to a hostname so Caddy can issue a Let's Encrypt cert).
+  The commands below use an `hnsearch` ssh alias. It lives in `~/.ssh/config`, not in
+  the repo, so **on a new machine add it first** — and the box is key-only
+  (`PasswordAuthentication no`), so that machine's pubkey must already be in root's
+  `authorized_keys`:
+  ```
+  Host hnsearch
+      HostName 167.233.115.172
+      User root
+      IdentityFile ~/.ssh/id_ed25519
+      ServerAliveInterval 30
+      ServerAliveCountMax 3
+  ```
 - **Service**: systemd unit `hnsearch` → `/usr/local/bin/rust-search`, reading
   `ARTIFACT_DIR=/var/lib/hnsearch/current` (a symlink) and `/etc/hnsearch.env`
   (holds the tokens). Unit source: `rust-search/deploy/hnsearch.service`.
@@ -68,8 +80,8 @@ The daily updater batches at 1000 rows (~10 MB), comfortably under 64 MB.
 # from repo root — sync source (NOT target), build on the box, install, restart
 rsync -avP --exclude target --exclude .git \
   rust-search/src rust-search/Cargo.toml rust-search/Cargo.lock \
-  root@167.233.115.172:/root/rust-search/
-ssh root@167.233.115.172 '
+  hnsearch:/root/rust-search/
+ssh hnsearch '
   cd /root/rust-search && cargo build --release &&
   install -m755 target/release/rust-search /usr/local/bin/rust-search &&
   systemctl restart hnsearch && sleep 2 &&
@@ -82,9 +94,10 @@ confirms it came up. The **tail persists across restarts** (`tail_codes.bin` /
 
 ### Ship new artifacts (full rebuild only)
 
-Use `rust-search/scripts/rsync_artifacts.sh` (atomic release dir + symlink flip).
-A fresh base ships with an empty tail; the next updater re-appends `id > max_id`
-from BigQuery. Only flip a release built from a complete, up-to-date dump.
+Use `REMOTE=hnsearch rust-search/scripts/rsync_artifacts.sh` (atomic release dir +
+symlink flip). A fresh base ships with an empty tail; the next updater re-appends
+`id > max_id` from BigQuery. Only flip a release built from a complete, up-to-date
+dump.
 
 ## Updating the corpus
 
