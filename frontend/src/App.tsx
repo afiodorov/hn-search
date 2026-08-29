@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Answer } from './components/Answer'
+import { Freshness } from './components/Freshness'
 import { ProgressLog } from './components/ProgressLog'
 import { RecentQueries } from './components/RecentQueries'
 import { SearchBar } from './components/SearchBar'
@@ -72,6 +73,7 @@ export default function App() {
           Ask questions about Hacker News discussions, get answers with
           sources.
         </p>
+        <Freshness />
 
         <SearchBar
           value={input}

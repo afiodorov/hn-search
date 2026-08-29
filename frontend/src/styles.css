@@ -70,6 +70,12 @@ main {
   min-width: 0;
 }
 
+.freshness {
+  margin: -8px 0 16px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
 .recent {
   grid-area: recent;
 }

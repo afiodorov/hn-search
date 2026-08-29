@@ -24,3 +24,9 @@ export interface RecentQuery {
 }
 
 export type SearchStatus = 'idle' | 'running' | 'done' | 'error'
+
+export interface Stats {
+  count: number
+  max_id: number
+  latest_timestamp: string
+}

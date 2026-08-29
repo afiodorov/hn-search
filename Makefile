@@ -1,4 +1,5 @@
-.PHONY: format lint typecheck clean fetch embed artifacts rebuild
+.PHONY: format lint typecheck clean fetch embed artifacts rebuild \
+        staging staging-down staging-logs staging-prune
 
 # Default target - run both formatting and linting
 format:
@@ -44,3 +45,26 @@ artifacts:
 
 # Embed + build artifacts (run after `make fetch`); embed needs a GPU.
 rebuild: embed artifacts
+
+# ---- Staging on this box: https://hn.staging.fiodorov.es (GitHub login) ----
+# Builds the image from the working tree — no commit, no push, no Railway. The
+# shared Caddy + oauth2-proxy edge lives in ../staging-infra and must be up
+# first; this brings up only the app and its own Redis, neither publishing a port.
+STAGING := docker compose -f docker-compose.staging.yml
+
+staging:
+	@docker network inspect staging >/dev/null 2>&1 || \
+		{ echo "no 'staging' network — run 'make up' in ../staging-infra first"; exit 1; }
+	$(STAGING) up -d --build
+
+staging-down:
+	$(STAGING) down
+
+staging-logs:
+	$(STAGING) logs -f hn-search
+
+# Every `make staging` orphans the previous image and grows the build cache.
+# Safe: nothing in use is removed.
+staging-prune:
+	docker image prune -f
+	docker builder prune -f

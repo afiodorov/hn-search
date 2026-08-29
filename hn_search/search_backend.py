@@ -96,3 +96,12 @@ def get_docs(hn_ids: list[str]) -> dict[str, dict]:
     resp = _get_client().post("/docs", json={"hn_ids": hn_ids})
     resp.raise_for_status()
     return {d["id"]: d for d in resp.json()}
+
+
+def stats() -> dict:
+    """Corpus freshness: `{count, max_id, latest_timestamp}` from the service."""
+    if not RUST_URL:
+        raise RuntimeError("HN_SEARCH_URL is not set for the rust search backend")
+    resp = _get_client().get("/stats")
+    resp.raise_for_status()
+    return resp.json()

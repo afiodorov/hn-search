@@ -1,0 +1,63 @@
+# The staging stack for this app: https://hn.staging.fiodorov.es
+#
+# Nothing here publishes a host port. Caddy, on the shared `staging` network,
+# is the only way in, and it is what enforces the GitHub login — see
+# ../staging-infra. That invariant is the security boundary, not a style rule:
+# Docker's published ports bypass ufw, so a `ports:` line here would put the
+# service straight on the internet.
+#
+# Deliberately a separate compose *project* from docker-compose.yml (the dev
+# Redis). They share a directory, so without this `name:` both would be project
+# "hn-search" and `make clean` would start reaching into staging.
+#
+# The Rust search service is NOT part of this stack: staging talks to the same
+# production instance on the Hetzner box (HN_SEARCH_URL/HN_SEARCH_TOKEN in
+# .env.staging), read-only, so it needs no copy of the 12M-row artifacts.
+name: hn-search-staging
+
+services:
+  # Service and container names must be unique across every project that joins
+  # `staging`: Docker registers both as DNS aliases on that network.
+  # Convention: <repo> and <repo>-staging.
+  hn-search:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hn-search:staging
+    container_name: hn-search-staging
+    restart: unless-stopped
+    env_file:
+      - .env.staging
+    environment:
+      # Its own Redis, on this stack's private network — not the dev one on
+      # :6380, so staging's caches and recent-queries log stay separate.
+      REDIS_URL: redis://redis:6379/0
+      PORT: "8000"
+      LOG_LEVEL: INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - default   # reaches redis
+      - staging   # reachable by caddy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # No `ports:` and not on the `staging` network.
+
+volumes:
+  # Becomes hn-search-staging_redis-data — separate from dev's hn-search_redis_data.
+  redis-data:
+
+networks:
+  staging:
+    external: true

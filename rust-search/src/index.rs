@@ -67,6 +67,8 @@ pub struct Tail {
     f16: Vec<u8>,
     pub count: usize,
     pub max_id: i64,
+    /// ISO8601 timestamp of the newest doc (base + tail); "" if the store is empty.
+    pub latest_timestamp: String,
     codes_path: PathBuf,
     f16_path: PathBuf,
 }
@@ -75,7 +77,13 @@ impl Tail {
     /// Load tail segment, reconciling vector files against the SQLite row count.
     /// Append order is files-first then SQLite commit, so files may hold orphan
     /// rows after a crash — those are trimmed to match committed `sqlite_total`.
-    pub fn load(dir: &Path, base_count: usize, sqlite_total: usize, max_id: i64) -> Result<Tail> {
+    pub fn load(
+        dir: &Path,
+        base_count: usize,
+        sqlite_total: usize,
+        max_id: i64,
+        latest_timestamp: String,
+    ) -> Result<Tail> {
         let codes_path = dir.join("tail_codes.bin");
         let f16_path = dir.join("tail_f16.bin");
         let mut codes = std::fs::read(&codes_path).unwrap_or_default();
@@ -99,6 +107,7 @@ impl Tail {
             f16,
             count: want,
             max_id,
+            latest_timestamp,
             codes_path,
             f16_path,
         })
@@ -115,7 +124,12 @@ impl Tail {
 
     /// Append vectors (files-first + fsync, then in-memory). Returns nothing;
     /// the caller commits the matching SQLite rows afterwards.
-    pub fn append(&mut self, vecs: &[Vec<f32>], new_max_id: i64) -> Result<()> {
+    pub fn append(
+        &mut self,
+        vecs: &[Vec<f32>],
+        new_max_id: i64,
+        new_latest_timestamp: &str,
+    ) -> Result<()> {
         let mut code_buf = Vec::with_capacity(vecs.len() * CODE_BYTES);
         let mut f16_buf = Vec::with_capacity(vecs.len() * F16_ROW);
         for v in vecs {
@@ -130,6 +144,9 @@ impl Tail {
         self.f16.extend_from_slice(&f16_buf);
         self.count += vecs.len();
         self.max_id = self.max_id.max(new_max_id);
+        if new_latest_timestamp > self.latest_timestamp.as_str() {
+            self.latest_timestamp = new_latest_timestamp.to_string();
+        }
         Ok(())
     }
 }

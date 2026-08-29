@@ -36,7 +36,9 @@ the tail and are searchable immediately, no rebuild.
 Endpoints (all but `/health` need `Authorization: Bearer`):
 `GET /health`, `POST /search` (accepts optional `time_after`/`time_before` ISO8601
 bounds), `POST /similar` (`{hn_id, k?}` — reuses the doc's own stored embedding,
-excludes itself; 404 if not found), `POST /append`, `GET /max_id`.
+excludes itself; 404 if not found), `POST /append`, `GET /max_id`,
+`GET /stats` (read token → `{count, max_id, latest_timestamp}`; the web app proxies
+it at `/api/stats`, Redis-cached 5 min, and the UI shows it under the tagline).
 
 Auth is **two-token**: `HN_SEARCH_TOKEN` (read → `/search`) and
 `HN_SEARCH_ADMIN_TOKEN` (write → `/append`, `/max_id`). Admin is a superset.

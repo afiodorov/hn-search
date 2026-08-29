@@ -9,6 +9,7 @@
 //!   POST /docs    {hn_ids:[...]} -> [DocHit]  (batch text/metadata lookup, e.g. resolving parent_ids)
 //!   POST /append  {rows:[{hn_id, clean_text, author, timestamp, type, embedding, parent_id?}]}
 //!   GET  /max_id  -> {max_id}
+//!   GET  /stats   -> {count, max_id, latest_timestamp}  (read token)
 
 mod db;
 mod index;
@@ -166,6 +167,21 @@ async fn max_id(
     require_admin(&state, &headers)?;
     let id = state.tail.read().unwrap().max_id;
     Ok(Json(serde_json::json!({ "max_id": id })))
+}
+
+/// Corpus freshness for the UI: how many docs are indexed and the timestamp of
+/// the newest one. Read token, so the web app can poll it.
+async fn stats(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    require_read(&state, &headers)?;
+    let tail = state.tail.read().unwrap();
+    Ok(Json(serde_json::json!({
+        "count": state.base.count + tail.count,
+        "max_id": tail.max_id,
+        "latest_timestamp": tail.latest_timestamp,
+    })))
 }
 
 async fn search(
@@ -341,12 +357,16 @@ async fn append(
         let mut docs = Vec::new();
         let mut vecs = Vec::new();
         let mut new_max = tail.max_id;
+        let mut new_latest = String::new();
         for r in req.rows {
             if !seen.insert(r.hn_id.clone()) {
                 continue; // already present (DB) or duplicate within batch
             }
             if let Ok(n) = r.hn_id.parse::<i64>() {
                 new_max = new_max.max(n);
+            }
+            if r.timestamp > new_latest {
+                new_latest = r.timestamp.clone();
             }
             docs.push(db::Doc {
                 hn_id: r.hn_id,
@@ -363,7 +383,8 @@ async fn append(
         let skipped = incoming_ids.len() - appended;
         if appended > 0 {
             let start_rowid = (state.base.count + tail.count) as i64 + 1;
-            tail.append(&vecs, new_max).map_err(|e| e.to_string())?;
+            tail.append(&vecs, new_max, &new_latest)
+                .map_err(|e| e.to_string())?;
             db::insert_tail(&mut conn, start_rowid, &docs).map_err(|e| e.to_string())?;
         }
         Ok(AppendResp {
@@ -402,14 +423,16 @@ async fn main() -> anyhow::Result<()> {
     let conn = db::open(&dir.join("docs.sqlite"))?;
     let sqlite_total = db::total_count(&conn)?;
     let start_max_id = db::max_hn_id(&conn)?;
+    let latest_timestamp = db::latest_timestamp(&conn, start_max_id)?;
 
     let base = Base::open(&dir, meta.count)?;
-    let tail = Tail::load(&dir, meta.count, sqlite_total, start_max_id)?;
+    let tail = Tail::load(&dir, meta.count, sqlite_total, start_max_id, latest_timestamp)?;
     eprintln!(
-        "loaded base={} tail={} max_id={} shortlist={} read_auth={} admin_auth={}",
+        "loaded base={} tail={} max_id={} latest={} shortlist={} read_auth={} admin_auth={}",
         base.count,
         tail.count,
         start_max_id,
+        tail.latest_timestamp,
         shortlist,
         read_token.is_some(),
         admin_token.is_some()
@@ -436,6 +459,7 @@ async fn main() -> anyhow::Result<()> {
             post(append).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
         .route("/max_id", get(max_id))
+        .route("/stats", get(stats))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");

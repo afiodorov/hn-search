@@ -66,6 +66,20 @@ fn row_to_doc(r: &rusqlite::Row, offset: usize) -> rusqlite::Result<Doc> {
     })
 }
 
+/// Newest doc timestamp. HN ids are assigned monotonically, so the max-id row is
+/// the newest; looking it up via the hn_id index avoids a 12M-row scan of
+/// `timestamp` at startup.
+pub fn latest_timestamp(conn: &Connection, max_id: i64) -> Result<String> {
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT timestamp FROM doc WHERE hn_id = ?1",
+            [max_id.to_string()],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(v.unwrap_or_default())
+}
+
 /// Fetch one doc by logical row index (rowid = logical + 1).
 pub fn fetch(conn: &Connection, logical: usize) -> Result<Option<Doc>> {
     let mut stmt = conn.prepare_cached(

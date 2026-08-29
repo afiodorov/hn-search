@@ -1,4 +1,4 @@
-import type { ProgressEvent, RecentQuery, Source } from './types'
+import type { ProgressEvent, RecentQuery, Source, Stats } from './types'
 
 export interface SearchHandlers {
   onProgress: (ev: ProgressEvent) => void
@@ -46,4 +46,10 @@ export async function fetchRecent(limit = 25): Promise<RecentQuery[]> {
   if (!res.ok) throw new Error(`recent queries failed: ${res.status}`)
   const body = await res.json()
   return body.queries
+}
+
+export async function fetchStats(): Promise<Stats> {
+  const res = await fetch('/api/stats')
+  if (!res.ok) throw new Error(`stats failed: ${res.status}`)
+  return res.json()
 }
