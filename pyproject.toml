@@ -22,6 +22,7 @@ dependencies = [
     "pandas",
     "redis>=6.4.0",
     "httpx>=0.27",
+    "mcp>=2.1.1",
 ]
 
 # NOTE: torch is intentionally unpinned to any index. It is dev-only (serve uses
@@ -52,6 +53,11 @@ typeCheckingMode = "basic"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+test = [
+    "pytest>=9.1.1",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["hn_search"]

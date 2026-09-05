@@ -17,6 +17,10 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
 - `misc/` — data pipeline: BigQuery fetch, GPU/CPU embedding, artifact build, the
   daily incremental updater.
 - `frontend/` — React UI; `npm run build` emits assets the API serves.
+- `hn_search/api/agents.py` — the surface for other agents: `/mcp` (Streamable
+  HTTP MCP, tools `search`, `similar`, `comments`, `stats`, `ask`), the same as
+  JSON under `/api/find`, `/api/similar`, `/api/comments`, and `/llms.txt` as
+  the map. Unauthenticated on purpose. Tests: `uv run --group test pytest`.
 
 ## Two embedding paths (don't confuse them)
 

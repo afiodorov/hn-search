@@ -2,6 +2,8 @@
 
 import json
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -10,12 +12,23 @@ from sse_starlette import EventSourceResponse
 
 from .. import search_backend
 from ..cache_config import redis_client
+from . import agents
 from .search import job_manager, sse_search
 
 STATS_CACHE_KEY = "hn:stats"
 STATS_CACHE_TTL = 300  # the corpus only grows once a day
 
-app = FastAPI(title="HN RAG Search")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # The MCP transport keeps its own task group; it lives exactly as long as
+    # the app does. Nothing else needs starting: the encoder, the graph and the
+    # search client are all lazy singletons.
+    async with agents.server.session_manager.run():
+        yield
+
+
+app = FastAPI(title="HN RAG Search", lifespan=lifespan)
 
 
 @app.get("/api/search")
@@ -50,6 +63,13 @@ def stats():
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+# The machine-facing surface: /mcp, /api/find, /api/similar, /api/comments and
+# /llms.txt. Registered before the static mount below, which would otherwise
+# swallow /llms.txt and /mcp as files that do not exist.
+app.include_router(agents.router)
+app.add_route(agents.MCP_PATH, agents.mcp_app, methods=["GET", "POST", "DELETE"])
 
 
 _static_dir = Path(

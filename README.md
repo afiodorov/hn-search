@@ -126,6 +126,52 @@ REMOTE=hnsearch@your-box ./rust-search/scripts/rsync_artifacts.sh rust-search/ar
 The GPU box needs **no credentials** — only the public model + your raw parquet.
 `misc/gpu_embed.sh` / `sync_embeddings.sh` drive a rented GPU box from your laptop.
 
+## 🤖 For other agents
+
+An agent with its own model does not need the chat: it needs retrieval, and it
+wants to do the reasoning itself. So the pieces the RAG planner is built from
+are also handed out one by one, on three transports that share one set of
+functions (`hn_search/api/agents.py`):
+
+| Surface | What | For |
+|---|---|---|
+| `/mcp` | Streamable HTTP MCP, stateless, JSON responses | Claude Code, claude.ai connectors, the Claude API, OpenAI Responses / Agents SDK, ChatGPT |
+| `/api/find?q=`, `/api/similar?id=`, `/api/comments?ids=`, `/api/stats` | the same tools as GET routes returning JSON | anything that only has a web fetch; `/openapi.json` describes them |
+| `/llms.txt` | what this is, the result shape, where the above live | the first thing an agent reads |
+
+The MCP tools:
+
+- `search(query, k=10, time_after=None, time_before=None)` — semantic search,
+  through the same tool and Redis cache the planner uses. Up to 50 hits.
+- `similar(hn_id, k=10)` — comments like one specific item, by its own stored
+  embedding.
+- `comments(hn_ids)` — full text and `parent_id` for up to 50 ids.
+- `stats()` — corpus size and the newest comment's timestamp.
+- `ask(question)` — the whole pipeline, for a caller that would rather have the
+  finished cited answer and pay for the DeepSeek turn.
+
+Pointing an agent at it:
+
+```sh
+claude mcp add --transport http hn-search https://hn.fiodorov.es/mcp
+```
+
+```python
+# Claude Messages API
+mcp_servers=[{"type": "url", "url": "https://hn.fiodorov.es/mcp", "name": "hn-search"}]
+
+# OpenAI Responses API
+tools=[{"type": "mcp", "server_label": "hn-search",
+        "server_url": "https://hn.fiodorov.es/mcp", "require_approval": "never"}]
+```
+
+No auth, by design: `/api/search` was already open, and the read token stays
+between the web app and the Rust service. On staging the GitHub login in front
+of everything means an external agent cannot reach `/mcp` there — test against
+prod, or exempt the path in `../staging-infra`.
+
+Tests for this surface: `uv run --group test pytest`.
+
 ## 🔐 Security
 
 - **Two tokens.** `HN_SEARCH_TOKEN` (read) grants `/search` and lives on the public
