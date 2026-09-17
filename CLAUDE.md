@@ -58,7 +58,20 @@ bodies — they must agree:
 
 The daily updater batches at 1000 rows (~10 MB), comfortably under 64 MB.
 
-## Production deployment (Hetzner VPS)
+## Production deployment (Railway, the web app)
+
+**Pushing `main` deploys production.** Railway builds the `Dockerfile` from the
+GitHub repo (`hn-search-web` service, `Redis` alongside) and is live at
+https://hn.fiodorov.es a few minutes later; `railway deployment list` shows it
+(`railway link -p hn-search -s hn-search-web` once per machine; the CLI's
+interactive prompts hang under an agent, so pass the flags). Railway variables
+hold `DEEPSEEK_API_KEY`, `HN_SEARCH_URL`/`HN_SEARCH_TOKEN`, and for the admin
+sign-in `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (a GitHub OAuth app with
+callback `https://hn.fiodorov.es/oauth2/callback`) and optionally
+`ADMIN_GITHUB_USERS` (default `afiodorov`). Without the OAuth pair the site
+works, but nobody can delete recent searches (`hn_search/api/auth.py`).
+
+## Production deployment (Hetzner VPS, the search service)
 
 - **Host**: `root@167.233.115.172`, public URL `https://167.233.115.172.sslip.io`
   (sslip.io maps the IP to a hostname so Caddy can issue a Let's Encrypt cert).

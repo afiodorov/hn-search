@@ -34,6 +34,12 @@ services:
       REDIS_URL: redis://redis:6379/0
       PORT: "8000"
       LOG_LEVEL: INFO
+      # Staging sits behind Caddy + oauth2-proxy, which already knows who you
+      # are and copies the GitHub login into this header, overwriting anything
+      # the client sent. Safe here only because nothing in this stack
+      # publishes a port: a client that could reach the container directly
+      # could set it. Prod uses GITHUB_CLIENT_ID/SECRET and its own flow.
+      AUTH_TRUSTED_USER_HEADER: X-Auth-Request-User
     depends_on:
       redis:
         condition: service_healthy

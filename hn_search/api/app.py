@@ -6,13 +6,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette import EventSourceResponse
 
 from .. import search_backend
 from ..cache_config import redis_client
-from . import agents
+from ..logging_config import get_logger
+from . import agents, auth
 from .search import job_manager, sse_search
 
 STATS_CACHE_KEY = "hn:stats"
@@ -28,6 +29,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
 
 
+logger = get_logger(__name__)
+
 app = FastAPI(title="HN RAG Search", lifespan=lifespan)
 
 
@@ -42,6 +45,22 @@ def search(q: str = ""):
 @app.get("/api/recent")
 def recent(limit: int = 25):
     return {"queries": job_manager.get_recent_queries(min(limit, 100))}
+
+
+@app.delete("/api/recent", status_code=204)
+def delete_recent(q: str, request: Request) -> Response:
+    """Forget a query — its row in the recent list and its cached answer.
+
+    Admins only (`auth.py`): the list is shared, so anyone could otherwise
+    delete anyone's search. Idempotent, and deliberately never 404s: the list
+    is a snapshot, so the row you clicked may already have been trimmed or
+    deleted from another tab. Reporting that as a failure would leave a row
+    nobody can get rid of.
+    """
+    who = auth.require_admin(request)
+    logger.info(f"{who} deleted recent query: {q!r}")
+    job_manager.delete_recent_query(q)
+    return Response(status_code=204)
 
 
 @app.get("/api/stats")
@@ -69,6 +88,7 @@ def health():
 # /llms.txt. Registered before the static mount below, which would otherwise
 # swallow /llms.txt and /mcp as files that do not exist.
 app.include_router(agents.router)
+app.include_router(auth.router)
 app.add_route(agents.MCP_PATH, agents.mcp_app, methods=["GET", "POST", "DELETE"])
 
 

@@ -83,6 +83,11 @@ Three decisions worth knowing about:
   `ask` MCP tool / JSON route report `refused` so a calling agent can tell a
   refusal from an answer.
 
+A refused query also never reaches the shared "recent searches" list: a
+query is put there once its answer is known, and only if the guard admitted
+it, so an injection attempt or a pasted rant is not put on display for the
+next visitor.
+
 Two kinds of check: `make test` stubs the classifier and covers the wiring (a
 refusal must never reach the search backend; the length cap must be free; a
 broken classifier must fail open). `make eval` runs the real classifier over
@@ -168,6 +173,31 @@ REMOTE=hnsearch@your-box ./rust-search/scripts/rsync_artifacts.sh rust-search/ar
 ```
 The GPU box needs **no credentials** — only the public model + your raw parquet.
 `misc/gpu_embed.sh` / `sync_embeddings.sh` drive a rented GPU box from your laptop.
+
+## Admins
+
+Everything here is public and read-only except deleting a row from the shared
+"recent searches" list, which needs an admin: a GitHub login listed in
+`ADMIN_GITHUB_USERS` (default `afiodorov`). The list shows delete buttons only
+to admins, and `DELETE /api/recent?q=` answers 403 to everyone else. Deleting
+forgets the query's cached answer too, so nothing of it is served again.
+
+Two ways of knowing who you are (`hn_search/api/auth.py`):
+
+- **Prod (Railway):** the app runs GitHub OAuth itself. `GITHUB_CLIENT_ID` and
+  `GITHUB_CLIENT_SECRET` name a GitHub OAuth app whose authorization callback
+  URL is `https://hn.fiodorov.es/oauth2/callback`. "Sign in with GitHub" under
+  the recent list sends the browser to GitHub; the login name comes back in an
+  HMAC-signed cookie (30 days, key derived from the client secret or
+  `SESSION_SECRET`). No token is stored.
+- **Staging:** the app sits behind Caddy + oauth2-proxy, which already knows
+  who you are and copies `X-Auth-Request-User` from oauth2-proxy, overwriting
+  anything the client sent. `AUTH_TRUSTED_USER_HEADER=X-Auth-Request-User` in
+  `docker-compose.staging.yml` tells the app to believe it. Never set that
+  where a client can reach the app directly.
+
+With neither configured, nobody is an admin and deletes are refused rather
+than left open.
 
 ## 🤖 For other agents
 

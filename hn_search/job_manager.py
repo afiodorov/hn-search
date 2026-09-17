@@ -192,6 +192,26 @@ class JobManager:
         except Exception as e:
             logger.exception(f"⚠️ Error tracking recent query: {e}")
 
+    def delete_recent_query(self, query: str) -> None:
+        """Forget a query: its row in the recent list and its cached job
+        (status, result, progress), so nothing of it is served again. The
+        eval log is left alone — it is a record of what the pipeline did.
+        Idempotent; a query that is already gone is not an error."""
+        if not self.redis:
+            return
+
+        try:
+            job_id = self.get_job_id(query)
+            self.redis.zrem("recent_queries", query)
+            self.redis.delete(
+                f"job:{job_id}:status",
+                f"job:{job_id}:result",
+                f"job:{job_id}:progress",
+                f"job:{job_id}:error",
+            )
+        except Exception as e:
+            logger.exception(f"⚠️ Error deleting recent query: {e}")
+
     def get_recent_queries(self, limit: int = 10) -> list:
         """Get most recent queries with timestamps."""
         if not self.redis:

@@ -25,6 +25,15 @@ export interface RecentQuery {
 
 export type SearchStatus = 'idle' | 'running' | 'done' | 'error'
 
+/** GET /auth/me. `login` is null when not signed in; `configured` is false when
+ *  the deployment has no GitHub OAuth app, in which case there is no sign-in
+ *  to offer and nobody can delete. */
+export interface Me {
+  login: string | null
+  admin: boolean
+  configured: boolean
+}
+
 export interface Stats {
   count: number
   max_id: number

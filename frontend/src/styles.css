@@ -493,6 +493,75 @@ main {
   color: var(--accent);
 }
 
+.recent-auth {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.recent-auth:empty {
+  display: none;
+}
+.recent-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-badge {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.recent-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline;
+  -webkit-line-clamp: unset;
+}
+.recent-link:hover {
+  text-decoration: underline;
+}
+.recent-delete {
+  flex: none;
+  display: inline;
+  padding: 0 0 0 4px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0;
+  -webkit-line-clamp: unset;
+}
+.recent li:hover .recent-delete,
+.recent li:focus-within .recent-delete {
+  opacity: 1;
+}
+.recent-delete:hover,
+.recent-delete:focus-visible {
+  opacity: 1;
+  color: #c62828;
+}
+@media (hover: none) {
+  .recent-delete {
+    opacity: 1;
+  }
+}
+
 .time-ago {
   margin-left: auto;
   flex: none;

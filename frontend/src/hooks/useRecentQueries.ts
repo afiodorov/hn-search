@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchRecent } from '../api'
+import { deleteRecent, fetchRecent } from '../api'
 import type { RecentQuery } from '../types'
 
 export function useRecentQueries(limit = 25) {
@@ -21,11 +21,26 @@ export function useRecentQueries(limit = 25) {
     }
   }, [limit])
 
+  // Drop the row at once rather than waiting for the next poll, then refresh
+  // so the list reflects what the server actually kept.
+  const remove = useCallback(
+    async (query: string) => {
+      setQueries((prev) => prev.filter((q) => q.query !== query))
+      try {
+        await deleteRecent(query)
+      } finally {
+        lastRef.current = ''
+        refresh()
+      }
+    },
+    [refresh],
+  )
+
   useEffect(() => {
     refresh()
     const id = setInterval(refresh, 5000)
     return () => clearInterval(id)
   }, [refresh])
 
-  return { queries, refresh }
+  return { queries, refresh, remove }
 }

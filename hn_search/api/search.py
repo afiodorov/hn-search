@@ -31,7 +31,6 @@ def _done() -> ServerSentEvent:
 
 def sse_search(query: str):
     claimed, job_id = job_manager.try_claim_job(query)
-    job_manager.track_recent_query(query)
 
     if claimed:
         yield from _process(query, job_id)
@@ -44,14 +43,30 @@ def sse_search(query: str):
             # deterministic pipeline, but the agentic planner call is never
             # cached and isn't perfectly reproducible, so "replaying" it was
             # silently redoing real (slow) work instead of reusing the answer.
+            _track(query, result)
             yield from _replay(job_id, result)
         else:
             yield from _attach(query, job_id)
 
 
+def _track(query: str, result: dict) -> None:
+    """Put the query on the shared "recent searches" list — once its answer is
+    known, and only if the scope filter admitted it. What the guard refused
+    (injection attempts, pasted rants, tasks for the model) is nobody else's
+    business and must not be shown to the next visitor."""
+    if not result.get("refused"):
+        job_manager.track_recent_query(query)
+
+
 def _result_events(result: dict):
     yield _sse({"type": "sources", "sources": result.get("sources", [])})
-    yield _sse({"type": "answer", "text": result.get("answer", "")})
+    yield _sse(
+        {
+            "type": "answer",
+            "text": result.get("answer", ""),
+            "refused": bool(result.get("refused")),
+        }
+    )
 
 
 def _replay(job_id: str, result: dict):
@@ -77,6 +92,7 @@ def _process(query: str, job_id: str):
                 sources = event["sources"]
             elif etype == "answer":
                 answer = event["text"]
+                refused = bool(event.get("refused"))
                 # Persist the moment the answer is known, before trying to
                 # forward it — if the client disconnected while we were
                 # working (tab backgrounded/discarded mid-request), yielding
@@ -85,9 +101,11 @@ def _process(query: str, job_id: str):
                 # fully-computed answer. Anything attach()ed or replaying this
                 # job would then hang forever waiting for a result that was
                 # actually done and just never got saved.
-                job_manager.store_result(job_id, {"answer": answer, "sources": sources})
+                result = {"answer": answer, "sources": sources, "refused": refused}
+                job_manager.store_result(job_id, result)
+                _track(query, result)
                 # A refusal is not a retrieval to regress against.
-                if not event.get("refused"):
+                if not refused:
                     job_manager.log_eval_record(query, sources, answer)
             elif etype == "error":
                 job_manager.store_error(job_id, event["message"])
@@ -118,6 +136,7 @@ def _attach(query: str, job_id: str):
 
         result = job_manager.get_result(job_id)
         if result:
+            _track(query, result)
             yield from _result_events(result)
             yield _done()
             return

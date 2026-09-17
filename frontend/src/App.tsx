@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { fetchMe, logout } from './api'
 import { Answer } from './components/Answer'
 import { Freshness } from './components/Freshness'
 import { ProgressLog } from './components/ProgressLog'
@@ -8,6 +9,9 @@ import { Sources } from './components/Sources'
 import { useRecentQueries } from './hooks/useRecentQueries'
 import { useSearch } from './hooks/useSearch'
 import { useTheme } from './hooks/useTheme'
+import type { Me } from './types'
+
+const ANONYMOUS: Me = { login: null, admin: false, configured: false }
 
 function queryFromUrl(): string {
   return new URLSearchParams(location.search).get('q') ?? ''
@@ -15,9 +19,18 @@ function queryFromUrl(): string {
 
 export default function App() {
   const { status, steps, answer, sources, error, run } = useSearch()
-  const { queries, refresh } = useRecentQueries(25)
+  const { queries, refresh, remove } = useRecentQueries(25)
   const { theme, toggle } = useTheme()
   const [input, setInput] = useState(queryFromUrl)
+
+  // Who is looking. Only admins get delete buttons; everyone else sees the
+  // same list read-only, and a sign-in link when the deployment offers one.
+  const [me, setMe] = useState<Me>(ANONYMOUS)
+  useEffect(() => {
+    fetchMe().then(setMe, () => setMe(ANONYMOUS))
+  }, [])
+  const signOut = () =>
+    logout().then(() => setMe({ ...me, login: null, admin: false }))
 
   const runSearch = useCallback(
     (q: string, push = true) => {
@@ -91,7 +104,13 @@ export default function App() {
         <Sources sources={sources} />
       </main>
 
-      <RecentQueries queries={queries} onSelect={runSearch} />
+      <RecentQueries
+        queries={queries}
+        me={me}
+        onSelect={runSearch}
+        onDelete={remove}
+        onSignOut={signOut}
+      />
     </div>
   )
 }
