@@ -8,10 +8,11 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
 ## Layout
 
 - `hn_search/` — Python web app: FastAPI + SSE API, agentic LangGraph RAG
-  (`rag/agent.py`: tool-calling planner + guaranteed baseline search, fused by rank
-  and handed to DeepSeek — see `rag/tools.py` for the `semantic_search`/
-  `similar_comments` tools), ONNX query encoder, Redis cache, `search_backend.py`
-  (talks to the Rust service).
+  (`rag/agent.py`: a `guard` scope-filter node first, then tool-calling planner +
+  guaranteed baseline search, fused by rank and handed to DeepSeek — see
+  `rag/tools.py` for the `semantic_search`/`similar_comments` tools and
+  `rag/guard.py` for the filter), ONNX query encoder, Redis cache,
+  `search_backend.py` (talks to the Rust service).
 - `rust-search/` — the search service (axum, rayon, memmap2, rusqlite, half).
   `src/main.rs` is the HTTP layer; `index.rs`/`quantize.rs`/`db.rs` do the work.
 - `misc/` — data pipeline: BigQuery fetch, GPU/CPU embedding, artifact build, the
@@ -155,6 +156,16 @@ ARTIFACT_DIR=./artifacts PORT=8001 HN_SEARCH_TOKEN=dev ./target/release/rust-sea
   Same lazy-init-once behavior, no manual `if x is None` check, and it works
   identically whether the module's called from the API, the CLI, or a script.
 - Auth is **disabled** when no token env is set (local dev only).
+- `make test` — unit tests, no key, no Redis, no service (everything stubbed).
+- `make eval` — the guardrail eval: promptfoo runs the real `rag/guard.py`
+  classifier over `evals/guard/cases.yaml`. Calls DeepSeek (needs
+  `DEEPSEEK_API_KEY`), costs a fraction of a cent; run after touching the guard
+  prompt, not on every commit. `make eval-view` browses the last run. The
+  target pins `PROMPTFOO_PYTHON_WORKERS=1`: promptfoo's default pool of
+  persistent Python workers stalled on this box (cases "timed out after
+  300000ms" while the classifier answers in ~1s). If a run dies anyway, results
+  are still stored: `npx promptfoo@latest list evals`, then
+  `export eval <id> --output x.json`.
 - RAG regression check: `uv run python misc/eval_judge.py` replays
   `evals/production_queries.jsonl` (real logged queries, see `job_manager.py`'s
   `log_eval_record`) through the current pipeline and has an LLM judge flag any

@@ -225,3 +225,7 @@ evals/reports/
 
 # staging secrets (see .env.staging.example)
 .env.staging
+
+# promptfoo eval output and its npx cache
+evals/guard/output/
+.promptfoo/

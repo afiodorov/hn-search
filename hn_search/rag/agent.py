@@ -35,6 +35,11 @@ Still single-hop for the planner (it can request 1+ tool calls in one turn, whic
 ToolNode runs together, but the graph doesn't loop back to the planner after) — a
 real multi-turn loop is a later step, for when a tool's result needs to inform a
 *subsequent* tool choice.
+
+`guard` runs before any of that. It is the one node that can end the run on its
+own: an off-topic or over-long query routes straight to END with a canned
+refusal, so the planner, the searches and the synthesis call never happen. See
+`guard.py` for why that is a separate model call rather than a line in a prompt.
 """
 
 import functools
@@ -51,6 +56,7 @@ from hn_search.cache_config import cache_answer, get_cached_answer
 from hn_search.logging_config import get_logger
 from hn_search.search_backend import get_docs
 
+from . import guard
 from .nodes import build_context, build_prompt, make_llm
 from .state import SearchResult
 from .tools import semantic_search, similar_comments
@@ -121,12 +127,35 @@ _SYSTEM_PROMPT = (
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     query: str
+    # Set by the guard node and read only by the router after it.
+    on_topic: bool
     tool_calls: list[dict]
     time_after: str | None
     time_before: str | None
     sources: list[SearchResult]
     parent_texts: dict[str, str]
     answer: str
+
+
+def _guard_node(state: AgentState) -> AgentState:
+    """Admit or refuse. A refusal fills in `answer` itself (and an empty
+    `sources`), which is all a downstream consumer needs to render it."""
+    query = state["query"]
+    if len(query) > guard.MAX_QUERY_CHARS:
+        # Free: no model call for a pasted document.
+        return {
+            **state,
+            "on_topic": False,
+            "answer": guard.TOO_LONG_TEXT,
+            "sources": [],
+        }
+    if guard.is_in_scope(query):  # fails open; never raises
+        return {**state, "on_topic": True}
+    return {**state, "on_topic": False, "answer": guard.REFUSAL_TEXT, "sources": []}
+
+
+def _admitted(state: AgentState) -> str:
+    return "agent" if state["on_topic"] else END
 
 
 def _agent_node(state: AgentState) -> AgentState:
@@ -217,7 +246,12 @@ def _run_baseline_search(
     query: str, time_after: str | None, time_before: str | None
 ) -> list[SearchResult]:
     return semantic_search.invoke(
-        {"query": query, "k": _DEFAULT_K, "time_after": time_after, "time_before": time_before}
+        {
+            "query": query,
+            "k": _DEFAULT_K,
+            "time_after": time_after,
+            "time_before": time_before,
+        }
     )
 
 
@@ -326,12 +360,14 @@ def create_agent_workflow():
     logger.info("🔧 Compiling agentic RAG workflow...")
     workflow = StateGraph(AgentState)
 
+    workflow.add_node("guard", _guard_node)
     workflow.add_node("agent", _agent_node)
     workflow.add_node("tools", ToolNode(_TOOLS))
     workflow.add_node("gather_sources", _gather_sources)
     workflow.add_node("synthesize_answer", _synthesize_answer)
 
-    workflow.set_entry_point("agent")
+    workflow.set_entry_point("guard")
+    workflow.add_conditional_edges("guard", _admitted, {"agent": "agent", END: END})
     workflow.add_conditional_edges(
         "agent", tools_condition, {"tools": "tools", END: "gather_sources"}
     )

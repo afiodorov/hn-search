@@ -20,6 +20,7 @@ def main():
     initial_state = AgentState(
         messages=[],
         query=args.query,
+        on_topic=False,
         tool_calls=[],
         time_after=None,
         time_before=None,

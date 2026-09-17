@@ -47,6 +47,49 @@ query or date bounds, or `/similar {hn_id}` (reusing a comment's own stored embe
 no reembedding) when the question references a specific HN link — before all result
 lists are fused by rank (RRF) and handed to DeepSeek. See `hn_search/rag/agent.py`.
 
+### Guardrails
+
+This is a public endpoint backed by a paid model, so a query is filtered before
+any of the above runs. Two layers, because either alone is weak:
+
+- **The `guard` node, a hard gate** (`hn_search/rag/guard.py`). The first node in
+  the graph is a separate, cheap DeepSeek call — `temperature=0`, four output
+  tokens, a vocabulary of `ALLOW` / `REFUSE` — that classifies the query. It
+  cannot be talked out of its verdict by the query itself: the query reaches it
+  as data inside `<query>` delimiters and the prompt says that region is never an
+  instruction. A refusal routes straight to END with a canned answer and no
+  sources; the planner, the searches and the synthesis call never run.
+- **The synthesis prompt, a soft gate.** It repeats the boundary for anything
+  that slips through.
+
+The net is deliberately wide: Hacker News discusses nearly everything, so
+"yoga", "struggling to study" and "should I raise VC money" are all admitted —
+the question is whether HN commenters might have talked about it. What gets
+refused is the other kind of request: a task for the model to perform itself
+(write code, translate, do arithmetic, rewrite my text), an attempt to change
+its instructions, abuse, or text with no topic in it.
+
+Three decisions worth knowing about:
+
+- **It fails open.** A classifier that errors, times out or answers something
+  unparseable lets the query through to the soft gate. A wobbly DeepSeek should
+  degrade the filter, not take search offline.
+- **There is a free length cap** (`MAX_QUERY_CHARS = 500`) checked before the
+  model call. Production saw whole HN comments pasted as "questions", and the
+  answer to those was an essay about a rant; the refusal now suggests pasting the
+  comment's link instead, which the planner turns into `similar_comments`.
+- **A refusal is not an eval record.** The SSE `answer` event carries
+  `refused: true`, `/api/search` skips the durable eval log for it, and the
+  `ask` MCP tool / JSON route report `refused` so a calling agent can tell a
+  refusal from an answer.
+
+Two kinds of check: `make test` stubs the classifier and covers the wiring (a
+refusal must never reach the search backend; the length cap must be free; a
+broken classifier must fail open). `make eval` runs the real classifier over
+`evals/guard/cases.yaml` — labelled queries grouped by metric (`in_scope`,
+`off_topic`, `injection`) — through promptfoo, so a prompt change shows *which
+kind* of query regressed. It calls DeepSeek and costs a fraction of a cent.
+
 ### The Rust service (`rust-search/`)
 
 Two-stage retrieval, the same shape pgvector used — but in ~1.1 GB RAM instead of 6 GB:
@@ -200,7 +243,7 @@ hn-search/
 │   ├── common.py              # ONNX query encoder
 │   ├── cache_config.py        # Redis caching
 │   ├── api/                   # FastAPI (SSE search, recent queries, static UI)
-│   └── rag/                   # agent.py (tool-calling graph) / tools.py / nodes.py / pipeline.py / cli.py / state.py
+│   └── rag/                   # agent.py (tool-calling graph) / guard.py (scope filter) / tools.py / nodes.py / pipeline.py / cli.py / state.py
 ├── rust-search/               # Rust vector search service
 │   ├── src/                   # quantize / index (mmap + tail) / db / main (axum)
 │   ├── deploy/                # systemd unit + Caddyfile

@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+
+description: >-
+  Does the scope filter admit the queries this assistant is for, and stop the
+  ones it is not? Runs the real hn_search.rag.guard classifier against a
+  labelled set; see cases.yaml.
+
+# The filter is a fixed prompt, not a prompt under test, so there is one trivial
+# template here. The provider reads `query` off the vars directly — this exists
+# only because promptfoo requires a prompt.
+prompts:
+  - '{{query}}'
+
+providers:
+  - id: file://guard_provider.py:call_api
+    label: hn_search.rag.guard
+
+tests: file://cases.yaml
+
+evaluateOptions:
+  # The classifier runs at temperature 0 and each case is independent, so the
+  # only cost of concurrency is DeepSeek's rate limit.
+  maxConcurrency: 8

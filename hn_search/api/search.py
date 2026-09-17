@@ -86,7 +86,9 @@ def _process(query: str, job_id: str):
                 # job would then hang forever waiting for a result that was
                 # actually done and just never got saved.
                 job_manager.store_result(job_id, {"answer": answer, "sources": sources})
-                job_manager.log_eval_record(query, sources, answer)
+                # A refusal is not a retrieval to regress against.
+                if not event.get("refused"):
+                    job_manager.log_eval_record(query, sources, answer)
             elif etype == "error":
                 job_manager.store_error(job_id, event["message"])
                 yield _sse(event)

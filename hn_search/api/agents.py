@@ -134,15 +134,16 @@ def ask(question: str) -> dict:
     """The whole pipeline: planner, searches, fusion, DeepSeek. Costs a model call."""
     if not question.strip():
         raise ValueError("question must not be empty")
-    answer, sources = "", []
+    answer, sources, refused = "", [], False
     for event in search_stream(question.strip()):
         if event["type"] == "sources":
             sources = event["sources"]
         elif event["type"] == "answer":
             answer = event["text"]
+            refused = bool(event.get("refused"))
         elif event["type"] == "error":
             raise RuntimeError(event["message"])
-    return {"answer": answer, "sources": sources}
+    return {"answer": answer, "sources": sources, "refused": refused}
 
 
 # --- MCP ---------------------------------------------------------------------
@@ -247,7 +248,9 @@ async def stats_tool() -> dict[str, Any]:
 async def ask_tool(question: str) -> dict[str, Any]:
     """Ask the hosted RAG agent and get its finished, cited answer plus the
     sources it used. Slower and lossier than searching yourself; use it when you
-    want a second opinion or do not want to run the searches.
+    want a second opinion or do not want to run the searches. A question that is
+    not about what Hacker News discusses is refused: `refused` is true and
+    `answer` says so.
 
     Args:
         question: A question about what Hacker News thinks.

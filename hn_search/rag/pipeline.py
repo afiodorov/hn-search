@@ -5,7 +5,9 @@ Event types:
     {"type": "progress", "step", "label", "status": "start"|"done", "ms", "hit"}
     {"type": "sources", "sources": [{id, author, timestamp, type, text, url, distance}]}
     {"type": "token", "text"}    -- answer delta (currently emitted as one chunk)
-    {"type": "answer", "text"}   -- full answer, always emitted last
+    {"type": "answer", "text", "refused"}   -- full answer, always emitted last;
+                                  refused=True when the scope filter stopped the
+                                  query and `text` is the canned refusal
     {"type": "error", "message"}
 """
 
@@ -19,6 +21,7 @@ from .agent import AgentState, create_agent_workflow
 logger = get_logger(__name__)
 
 _NODE_LABELS = {
+    "guard": "Scope check",
     "agent": "Planning search",
     "tools": "Searching (agent-requested)",
     "gather_sources": "Searching (baseline) + merging",
@@ -42,6 +45,8 @@ def _next_node(node_name: str, delta: dict) -> Optional[str]:
     event can be emitted the instant the current node finishes — otherwise
     stream_mode="updates" only ever tells us about a node *after* it completes,
     leaving the client with no spinner during the long synthesize_answer call."""
+    if node_name == "guard":
+        return "agent" if delta.get("on_topic") else None
     if node_name == "agent":
         messages = delta.get("messages") or []
         last = messages[-1] if messages else None
@@ -60,6 +65,7 @@ def search_stream(query: str) -> Iterator[dict]:
     initial_state = AgentState(
         messages=[],
         query=query,
+        on_topic=False,
         tool_calls=[],
         time_after=None,
         time_before=None,
@@ -69,7 +75,7 @@ def search_stream(query: str) -> Iterator[dict]:
     )
 
     try:
-        yield _progress("agent", "start")
+        yield _progress("guard", "start")
         t0 = time.perf_counter()
         for update in workflow.stream(initial_state, stream_mode="updates"):
             for node_name, delta in update.items():
@@ -77,7 +83,12 @@ def search_stream(query: str) -> Iterator[dict]:
                 logger.info(f"⏱️ {_NODE_LABELS.get(node_name, node_name)}: {ms}ms")
                 yield _progress(node_name, "done", ms=ms)
 
-                if node_name == "gather_sources":
+                if node_name == "guard" and not delta.get("on_topic"):
+                    # Refused: the guard wrote the answer itself and nothing
+                    # else will run, so this is the whole result.
+                    yield {"type": "sources", "sources": []}
+                    yield {"type": "answer", "text": delta["answer"], "refused": True}
+                elif node_name == "gather_sources":
                     sources = delta.get("sources", [])
                     logger.info(f"✅ Found {len(sources)} relevant comments/articles")
                     yield {
@@ -93,7 +104,7 @@ def search_stream(query: str) -> Iterator[dict]:
                 elif node_name == "synthesize_answer":
                     answer = delta.get("answer", "")
                     yield {"type": "token", "text": answer}
-                    yield {"type": "answer", "text": answer}
+                    yield {"type": "answer", "text": answer, "refused": False}
 
                 next_node = _next_node(node_name, delta)
                 if next_node:

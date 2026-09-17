@@ -1,4 +1,4 @@
-.PHONY: format lint typecheck clean fetch embed artifacts rebuild \
+.PHONY: format lint typecheck test eval eval-view clean fetch embed artifacts rebuild \
         staging staging-down staging-logs staging-prune
 
 # Default target - run both formatting and linting
@@ -21,6 +21,25 @@ lint:
 # Static type checking (requires the dev extra: uv sync --extra dev)
 typecheck:
 	uv run pyright
+
+# Unit tests: no API key, no Redis, no search service — everything is stubbed.
+test:
+	uv run --group test pytest -q
+
+# The guardrail eval. Unlike `test`, this calls DeepSeek for real — one cheap
+# classifier call per case in evals/guard/cases.yaml — so it needs
+# DEEPSEEK_API_KEY (in .env, or exported) and costs a fraction of a cent.
+# PROMPTFOO_PYTHON is not optional: promptfoo shells out to `python`, which on
+# most boxes is either missing or the wrong interpreter. PROMPTFOO_PYTHON_WORKERS=1
+# because promptfoo's pool of persistent Python workers (one per concurrent
+# case by default) stalls on this box — cases time out after 5 minutes while
+# the classifier itself answers in a second. One worker runs the set in ~40s.
+eval:
+	cd evals/guard && PROMPTFOO_PYTHON=$(CURDIR)/.venv/bin/python PROMPTFOO_PYTHON_WORKERS=1 npx -y promptfoo@latest eval --no-cache
+
+# The last run's results as a browsable table.
+eval-view:
+	cd evals/guard && npx -y promptfoo@latest view --yes
 
 # Clean ChromaDB container and volumes
 clean:
