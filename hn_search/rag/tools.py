@@ -35,10 +35,13 @@ def semantic_search(
         return cast(list[SearchResult], cached)
 
     # Cached under the original query, so a hit skips the translation too.
-    embedding = get_model().encode([to_english(query)])[0]
+    english = to_english(query)
+    embedding = get_model().encode([english or query])[0]
     rows = search(embedding, k, time_after=time_after, time_before=time_before)
     cache_data = results_to_cache_data(rows_to_results(rows))
-    if cache_data:
+    # An untranslated non-English query searched on noise: serve it, but don't
+    # pin it in the cache past the translator's recovery.
+    if cache_data and english is not None:
         cache_vector_search(query, cache_data, k, time_after, time_before)
     return cache_data
 

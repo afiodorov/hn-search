@@ -86,14 +86,14 @@ def test_accented_latin_script_is_translated_too(translator):
     assert len(translator.prompts) == 1
 
 
-def test_a_translator_error_falls_back_to_the_original(monkeypatch):
+def test_a_translator_error_is_reported_as_none(monkeypatch):
     monkeypatch.setattr(translate, "_model", lambda: _StubModel(RuntimeError("down")))
-    assert translate.to_english("图片无损压缩技术") == "图片无损压缩技术"
+    assert translate.to_english("图片无损压缩技术") is None
 
 
-def test_an_empty_reply_falls_back_to_the_original(monkeypatch):
+def test_an_empty_reply_is_reported_as_none(monkeypatch):
     monkeypatch.setattr(translate, "_model", lambda: _StubModel("  "))
-    assert translate.to_english("图片无损压缩技术") == "图片无损压缩技术"
+    assert translate.to_english("图片无损压缩技术") is None
 
 
 def test_search_embeds_the_translation_instead_of_the_original(translator, search_rig):
@@ -117,3 +117,25 @@ def test_a_cache_hit_skips_the_translation(monkeypatch, translator, search_rig):
     assert tools.semantic_search.invoke({"query": "图片无损压缩技术"}) == [{"id": "1"}]
     assert translator.prompts == []
     assert encoder.texts == []
+
+
+def test_a_failed_translation_searches_the_original_but_is_not_cached(
+    monkeypatch, search_rig
+):
+    """Caching the untranslated search would serve its noise for the whole
+    cache TTL, long after the translator is back."""
+    encoder, cached, searches = search_rig
+    monkeypatch.setattr(translate, "_model", lambda: _StubModel(RuntimeError("down")))
+
+    hits = tools.semantic_search.invoke({"query": "图片无损压缩技术"})
+
+    assert encoder.texts == ["图片无损压缩技术"]
+    assert [h["id"] for h in hits] == ["43000001"]
+    assert cached == []
+
+
+def test_plain_ascii_is_still_cached(translator, search_rig):
+    _, cached, _ = search_rig
+    tools.semantic_search.invoke({"query": "rust vs go"})
+    assert cached == ["rust vs go"]
+    assert translator.prompts == []

@@ -23,7 +23,10 @@ The output only ever becomes an embedding: it is never shown, stored or
 executed, so a query that talks the translator into saying something else can
 at worst spoil its own search results.
 
-Fails open: any error or empty reply returns the original query.
+Fails open, but says so: on any error or an empty reply it returns None, and
+the caller embeds the original instead and does not cache the result — those
+results are the noise this module exists to avoid, and caching them would
+serve them for the whole cache TTL, long after the translator recovers.
 """
 
 from __future__ import annotations
@@ -60,15 +63,19 @@ def _model() -> ChatOpenAI:
         temperature=0,
         # A query is a sentence or two; this bounds what a runaway reply costs.
         max_completion_tokens=200,
-        max_retries=2,
-        timeout=15,
+        # Tighter than the guard's budget: this sits on the same path, after
+        # it, and its fallback (search the original) is cheap. A slow DeepSeek
+        # should cost a non-English query seconds, not most of a minute.
+        max_retries=0,
+        timeout=5,
         cache=False,
     )
 
 
-def to_english(query: str) -> str:
-    """`query` as an English search query. Plain ASCII is returned as is, with
-    no model call. Raises nothing."""
+def to_english(query: str) -> str | None:
+    """`query` as an English search query, or None when it needed translating
+    and could not be. Plain ASCII is returned as is, with no model call. Raises
+    nothing."""
     if query.isascii():
         return query
     prompt = f"<query>\n{query}\n</query>"
@@ -76,9 +83,10 @@ def to_english(query: str) -> str:
         reply = _model().invoke([SystemMessage(SYSTEM), HumanMessage(prompt)])
     except Exception:
         logger.warning("query translation failed; embedding it as is", exc_info=True)
-        return query
+        return None
     english = str(reply.content).strip()
     if not english:
-        return query
+        logger.warning("query translation came back empty; embedding it as is")
+        return None
     logger.info("translated query %r -> %r", query[:120], english[:120])
     return english
