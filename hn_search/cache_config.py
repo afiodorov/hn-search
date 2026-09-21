@@ -54,6 +54,26 @@ except Exception as e:
     redis_client = None
 
 
+def _md5(text: str) -> str:
+    return hashlib.md5(text.encode()).hexdigest()
+
+
+def query_hash(query: str) -> str:
+    """The part of every per-query cache key that names the query. It leads the
+    key, so `query_cache_patterns` can find all of one query's entries — every
+    k, date range and context it was cached under — without knowing them."""
+    return _md5(query.strip())
+
+
+def query_cache_patterns(query: str) -> list[str]:
+    """SCAN patterns matching every search and answer cached for `query`, for
+    forgetting it (an admin deleting a recent search). Deleting only the job
+    result would not do: the next run would rebuild the same answer from the
+    same cached search results."""
+    h = query_hash(query)
+    return [f"vector:{h}:*", f"answer:{h}:*"]
+
+
 # Vector search cache functions
 def get_vector_cache_key(
     query: str,
@@ -67,8 +87,8 @@ def get_vector_cache_key(
     never collides with (or reuses) a plain search's cache entry for the same
     query text and k.
     """
-    raw = f"{query}:{k}:{time_after or ''}:{time_before or ''}"
-    return f"vector:{hashlib.md5(raw.encode()).hexdigest()}"
+    params = f"{k}:{time_after or ''}:{time_before or ''}"
+    return f"vector:{query_hash(query)}:{_md5(params)}"
 
 
 def get_cached_vector_search(
@@ -112,9 +132,7 @@ def cache_vector_search(
 # LangChain answer cache functions
 def get_answer_cache_key(query: str, context: str) -> str:
     """Generate a cache key for LLM answers."""
-    # Hash context to keep key manageable
-    context_hash = hashlib.md5(context.encode()).hexdigest()
-    return f"answer:{hashlib.md5(f'{query}:{context_hash}'.encode()).hexdigest()}"
+    return f"answer:{query_hash(query)}:{_md5(context)}"
 
 
 def get_cached_answer(query: str, context: str) -> Optional[str]:

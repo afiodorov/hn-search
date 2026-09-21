@@ -5,7 +5,7 @@ import json
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from hn_search.cache_config import RESULT_CACHE_TTL
+from hn_search.cache_config import RESULT_CACHE_TTL, query_cache_patterns
 from hn_search.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -193,10 +193,11 @@ class JobManager:
             logger.exception(f"⚠️ Error tracking recent query: {e}")
 
     def delete_recent_query(self, query: str) -> None:
-        """Forget a query: its row in the recent list and its cached job
-        (status, result, progress), so nothing of it is served again. The
-        eval log is left alone — it is a record of what the pipeline did.
-        Idempotent; a query that is already gone is not an error."""
+        """Forget a query: its row in the recent list, its cached job (status,
+        result, progress), and the search results and answers cached under it,
+        so its next run is computed afresh rather than rebuilt from the same
+        cache. The eval log is left alone — it is a record of what the pipeline
+        did. Idempotent; a query that is already gone is not an error."""
         if not self.redis:
             return
 
@@ -209,6 +210,10 @@ class JobManager:
                 f"job:{job_id}:progress",
                 f"job:{job_id}:error",
             )
+            for pattern in query_cache_patterns(query):
+                keys = list(self.redis.scan_iter(match=pattern, count=1000))
+                if keys:
+                    self.redis.delete(*keys)
         except Exception as e:
             logger.exception(f"⚠️ Error deleting recent query: {e}")
 
