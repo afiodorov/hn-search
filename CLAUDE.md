@@ -11,7 +11,9 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
   (`rag/agent.py`: a `guard` scope-filter node first, then tool-calling planner +
   guaranteed baseline search, fused by rank and handed to DeepSeek — see
   `rag/tools.py` for the `semantic_search`/`similar_comments` tools and
-  `rag/guard.py` for the filter), ONNX query encoder, Redis cache,
+  `rag/guard.py` for the filter; `rag/translate.py` turns any non-ASCII query
+  into English before embedding, since the encoder is English-only), ONNX query
+  encoder, Redis cache,
   `search_backend.py` (talks to the Rust service).
 - `rust-search/` — the search service (axum, rayon, memmap2, rusqlite, half).
   `src/main.rs` is the HTTP layer; `index.rs`/`quantize.rs`/`db.rs` do the work.

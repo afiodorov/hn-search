@@ -10,6 +10,7 @@ from hn_search.search_backend import search, similar
 
 from .nodes import results_to_cache_data, rows_to_results
 from .state import SearchResult
+from .translate import to_english
 
 
 @tool
@@ -33,7 +34,8 @@ def semantic_search(
     if cached:
         return cast(list[SearchResult], cached)
 
-    embedding = get_model().encode([query])[0]
+    # Cached under the original query, so a hit skips the translation too.
+    embedding = get_model().encode([to_english(query)])[0]
     rows = search(embedding, k, time_after=time_after, time_before=time_before)
     cache_data = results_to_cache_data(rows_to_results(rows))
     if cache_data:
