@@ -9,7 +9,7 @@
 //!   POST /docs    {hn_ids:[...]} -> [DocHit]  (batch text/metadata lookup, e.g. resolving parent_ids)
 //!   POST /append  {rows:[{hn_id, clean_text, author, timestamp, type, embedding, parent_id?}]}
 //!   GET  /max_id  -> {max_id}
-//!   GET  /stats   -> {count, max_id, latest_timestamp}  (read token)
+//!   GET  /stats   -> {count, max_id, earliest_timestamp, latest_timestamp}  (read token)
 
 mod db;
 mod index;
@@ -38,6 +38,8 @@ struct AppState {
     read_token: Option<String>,
     admin_token: Option<String>,
     shortlist: usize,
+    /// Timestamp of row 0, the oldest doc; fixed until the next full rebuild.
+    earliest_timestamp: String,
 }
 
 #[derive(Deserialize)]
@@ -46,10 +48,9 @@ struct SearchReq {
     k: Option<usize>,
     shortlist: Option<usize>,
     /// Inclusive ISO8601 bounds on `timestamp` (string-compared — valid since the
-    /// stored format is zero-padded ISO8601 with the date first). Filtering
-    /// happens after the usual Hamming shortlist + cosine rerank, so when either
-    /// bound is set we ask index::search for more candidates than `k` up front
-    /// to leave enough survivors after the filter.
+    /// stored format is zero-padded ISO8601 with the date first). They become a
+    /// row range (`db::time_range`) that the search scans instead of the whole
+    /// index, so a narrow window still returns `k` in-window results.
     time_after: Option<String>,
     time_before: Option<String>,
 }
@@ -169,8 +170,8 @@ async fn max_id(
     Ok(Json(serde_json::json!({ "max_id": id })))
 }
 
-/// Corpus freshness for the UI: how many docs are indexed and the timestamp of
-/// the newest one. Read token, so the web app can poll it.
+/// Corpus range for the UI: how many docs are indexed and the timestamps of the
+/// oldest and newest. Read token, so the web app can poll it.
 async fn stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -180,6 +181,7 @@ async fn stats(
     Ok(Json(serde_json::json!({
         "count": state.base.count + tail.count,
         "max_id": tail.max_id,
+        "earliest_timestamp": state.earliest_timestamp,
         "latest_timestamp": tail.latest_timestamp,
     })))
 }
@@ -197,17 +199,22 @@ async fn search(
         ));
     }
     let k = req.k.unwrap_or(10);
-    let has_time_filter = req.time_after.is_some() || req.time_before.is_some();
-    // Filtering happens after rerank truncates to fetch_k, so over-fetch when a
-    // time bound is set to leave enough survivors; plain searches are unaffected.
-    let fetch_k = if has_time_filter { k * 5 } else { k };
-    let shortlist = req.shortlist.unwrap_or(state.shortlist).max(fetch_k);
+    let shortlist = req.shortlist.unwrap_or(state.shortlist).max(k);
     let time_after = req.time_after.clone();
     let time_before = req.time_before.clone();
 
     let hits = tokio::task::spawn_blocking(move || -> Result<Vec<SearchHit>, String> {
+        // Same lock order as /append (tail, then db), so no deadlock.
         let tail = state.tail.read().unwrap();
-        let scored = index::search(&state.base, &tail, &req.embedding, shortlist, fetch_k);
+        let total = state.base.count + tail.count;
+        let rows = if time_after.is_some() || time_before.is_some() {
+            let conn = state.db.lock().unwrap();
+            db::time_range(&conn, total, time_after.as_deref(), time_before.as_deref())
+                .map_err(|e| e.to_string())?
+        } else {
+            0..total
+        };
+        let scored = index::search(&state.base, &tail, &req.embedding, shortlist, k, rows);
         drop(tail);
         let conn = state.db.lock().unwrap();
         let mut out = Vec::with_capacity(k);
@@ -216,6 +223,7 @@ async fn search(
                 break;
             }
             if let Some(d) = db::fetch(&conn, idx).map_err(|e| e.to_string())? {
+                // Exact-boundary guard; the row range already did the real work.
                 if let Some(after) = &time_after {
                     if &d.timestamp < after {
                         continue;
@@ -266,7 +274,8 @@ async fn similar(
         // +1 candidate to absorb the source document itself, which will always
         // be its own nearest neighbor at distance ~0.
         let shortlist = state.shortlist.max(k + 1);
-        let scored = index::search(&state.base, &tail, &query, shortlist, k + 1);
+        let all = 0..state.base.count + tail.count;
+        let scored = index::search(&state.base, &tail, &query, shortlist, k + 1, all);
         drop(tail);
 
         let conn = state.db.lock().unwrap();
@@ -424,6 +433,7 @@ async fn main() -> anyhow::Result<()> {
     let sqlite_total = db::total_count(&conn)?;
     let start_max_id = db::max_hn_id(&conn)?;
     let latest_timestamp = db::latest_timestamp(&conn, start_max_id)?;
+    let earliest_timestamp = db::fetch(&conn, 0)?.map(|d| d.timestamp).unwrap_or_default();
 
     let base = Base::open(&dir, meta.count)?;
     let tail = Tail::load(&dir, meta.count, sqlite_total, start_max_id, latest_timestamp)?;
@@ -445,6 +455,7 @@ async fn main() -> anyhow::Result<()> {
         read_token,
         admin_token,
         shortlist,
+        earliest_timestamp,
     });
 
     let app = Router::new()

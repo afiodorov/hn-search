@@ -13,6 +13,7 @@ use rayon::prelude::*;
 use std::collections::BinaryHeap;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 const F16_ROW: usize = DIM * 2; // 1536 bytes
@@ -181,8 +182,8 @@ fn push_bounded(heap: &mut BinaryHeap<(u32, usize)>, cap: usize, d: u32, idx: us
     }
 }
 
-fn scan_base(base: &Base, qcode: &[u8], shortlist: usize) -> BinaryHeap<(u32, usize)> {
-    (0..base.count)
+fn scan_base(base: &Base, qcode: &[u8], shortlist: usize, rows: Range<usize>) -> BinaryHeap<(u32, usize)> {
+    (rows.start.min(base.count)..rows.end.min(base.count))
         .into_par_iter()
         .fold(BinaryHeap::new, |mut h, i| {
             push_bounded(&mut h, shortlist, hamming(qcode, base.code(i)), i);
@@ -208,11 +209,22 @@ pub fn get_vector(base: &Base, tail: &Tail, idx: usize) -> Vec<f32> {
     decode_f16(bytes)
 }
 
-/// Two-stage search → `(logical_index, cosine_distance)` ascending, top-`k`.
-pub fn search(base: &Base, tail: &Tail, query: &[f32], shortlist: usize, k: usize) -> Vec<(usize, f32)> {
+/// Two-stage search over the logical rows in `rows` → `(logical_index,
+/// cosine_distance)` ascending, top-`k`. Restricting `rows` (e.g. to a time
+/// window from `db::time_range`) narrows the scan itself, so every candidate
+/// is in range — filtering a global top-k afterwards can leave nothing.
+pub fn search(
+    base: &Base,
+    tail: &Tail,
+    query: &[f32],
+    shortlist: usize,
+    k: usize,
+    rows: Range<usize>,
+) -> Vec<(usize, f32)> {
     let qcode = quantize(query);
-    let mut heap = scan_base(base, &qcode, shortlist);
-    for t in 0..tail.count {
+    let mut heap = scan_base(base, &qcode, shortlist, rows.clone());
+    let tail_rows = rows.start.saturating_sub(base.count)..rows.end.saturating_sub(base.count).min(tail.count);
+    for t in tail_rows {
         push_bounded(&mut heap, shortlist, hamming(&qcode, tail.code(t)), base.count + t);
     }
 
@@ -234,4 +246,47 @@ pub fn search(base: &Base, tail: &Tail, query: &[f32], shortlist: usize, k: usiz
     scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(k);
     scored
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A base where every row holds the same vector — a topic discussed
+    /// everywhere, which is exactly what a post-filtered top-k got wrong.
+    fn uniform_store(n: usize) -> (PathBuf, Base, Tail) {
+        let dir = std::env::temp_dir().join(format!("rust-search-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let v: Vec<f32> = (0..DIM).map(|i| (i as f32).sin()).collect();
+        let code = quantize(&v);
+        let row: Vec<u8> = v.iter().flat_map(|&x| f16::from_f32(x).to_le_bytes()).collect();
+        std::fs::write(dir.join("codes.bin"), code.repeat(n)).unwrap();
+        std::fs::write(dir.join("rerank_f16.bin"), row.repeat(n)).unwrap();
+        let _ = std::fs::remove_file(dir.join("tail_codes.bin"));
+        let _ = std::fs::remove_file(dir.join("tail_f16.bin"));
+        let base = Base::open(&dir, n).unwrap();
+        let tail = Tail::load(&dir, n, n, 0, String::new()).unwrap();
+        (dir, base, tail)
+    }
+
+    #[test]
+    fn search_stays_inside_row_range() {
+        let (dir, base, mut tail) = uniform_store(100);
+        let v: Vec<f32> = (0..DIM).map(|i| (i as f32).sin()).collect();
+        tail.append(&vec![v.clone(); 10], 0, "").unwrap();
+
+        let hits = search(&base, &tail, &v, 20, 5, 40..50);
+        assert_eq!(hits.len(), 5);
+        assert!(hits.iter().all(|(i, _)| (40..50).contains(i)));
+
+        // A range spanning base and tail, and one only in the tail.
+        let hits = search(&base, &tail, &v, 50, 50, 95..105);
+        let mut idx: Vec<usize> = hits.iter().map(|h| h.0).collect();
+        idx.sort();
+        assert_eq!(idx, (95..105).collect::<Vec<_>>());
+        assert!(search(&base, &tail, &v, 20, 5, 104..110).iter().all(|(i, _)| (104..110).contains(i)));
+        assert!(search(&base, &tail, &v, 20, 5, 30..30).is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

@@ -74,11 +74,20 @@ def build_context(
     return "\n\n---\n\n".join(blocks)
 
 
-def build_prompt(query: str, context: str) -> str:
+def build_prompt(
+    query: str, context: str, notes: str = "", archive_start: str | None = None
+) -> str:
+    archive = (
+        f"\nThe archive holds Hacker News comments from {archive_start} onward; "
+        "anything older is not in it.\n"
+        if archive_start
+        else ""
+    )
+    research = f"\nNotes from the research step: {notes}\n" if notes else ""
     return f"""You are a helpful assistant answering questions about Hacker News discussions.
 
 User Question: {query}
-
+{archive}{research}
 Here are relevant comments and articles from Hacker News:
 
 {context}
@@ -108,7 +117,11 @@ Example response format:
 The community has mixed views on this topic. As user john_doe explains, "Python is great for prototyping" [[1]](https://news.ycombinator.com/item?id=12345). Meanwhile, user jane_smith argues that performance can be an issue [[2]](https://news.ycombinator.com/item?id=67890)."""
 
 
-def make_llm(temperature: float = 0.7) -> ChatOpenAI:
+def make_llm(temperature: float = 0.7, thinking: bool = True) -> ChatOpenAI:
+    """thinking=False turns off DeepSeek's reasoning mode. A multi-turn tool
+    loop needs it off: in thinking mode the API rejects any turn whose earlier
+    tool-calling messages lack their `reasoning_content`, and langchain_openai
+    does not send that field back."""
     # cache=False: opt out of any global LangChain LLM cache (unreliable with
     # .stream()); the explicit get_cached_answer/cache_answer functions are
     # the real answer cache.
@@ -119,4 +132,5 @@ def make_llm(temperature: float = 0.7) -> ChatOpenAI:
         base_url="https://api.deepseek.com",
         temperature=temperature,
         cache=False,
+        extra_body=None if thinking else {"thinking": {"type": "disabled"}},
     )

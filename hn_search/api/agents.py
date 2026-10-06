@@ -131,7 +131,7 @@ def stats() -> dict:
 
 
 def ask(question: str) -> dict:
-    """The whole pipeline: planner, searches, fusion, DeepSeek. Costs a model call."""
+    """The whole pipeline: planner, searches, DeepSeek. Costs a few model calls."""
     if not question.strip():
         raise ValueError("question must not be empty")
     answer, sources, refused = "", [], False

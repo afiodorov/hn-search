@@ -36,7 +36,7 @@ class _StubModel:
         self.replies = list(replies)
         self.prompts = []
 
-    def bind_tools(self, _tools):
+    def bind_tools(self, _tools, **_kwargs):
         return self
 
     def invoke(self, messages):
@@ -51,27 +51,27 @@ class Rig:
     """The compiled graph with everything but the guard wiring stubbed out.
 
     `verdict` is what the classifier says; the planner makes no tool calls and
-    the baseline search returns one row, so an admitted query ends with a
+    the seed search returns one row, so an admitted query ends with a
     synthesised answer and one source.
     """
 
     def __init__(self, monkeypatch, verdict):
         self.classifier = _StubModel(verdict)
         self.searched: list[str] = []
-        self.planned: list[str] = []
         monkeypatch.setattr(guard, "_model", lambda: self.classifier)
 
-        def make_llm(temperature=0.7):
+        def make_llm(temperature=0.7, thinking=True):
             if temperature == 0:  # the planner
                 return _StubModel(AIMessage(content=""))
             return _StubModel("An answer.")
 
-        def baseline(query, time_after, time_before):
-            self.searched.append(query)
-            return [ROW]
+        def run_tool(name, args):
+            self.searched.append(args["query"])
+            return [ROW], "1 results"
 
         monkeypatch.setattr(agent, "make_llm", make_llm)
-        monkeypatch.setattr(agent, "_run_baseline_search", baseline)
+        monkeypatch.setattr(agent, "_run_tool", run_tool)
+        monkeypatch.setattr(agent, "archive_start", lambda: "2023-01-01")
         monkeypatch.setattr(agent, "_fetch_parent_texts", lambda sources: {})
         monkeypatch.setattr(agent, "get_cached_answer", lambda q, c: None)
         monkeypatch.setattr(agent, "cache_answer", lambda q, c, a: None)
@@ -146,13 +146,13 @@ def test_the_progress_log_names_the_check_and_stops_after_a_refusal(monkeypatch)
     assert steps == [("guard", "start"), ("guard", "done")]
 
 
-def test_an_admitted_query_moves_on_to_the_planner(monkeypatch):
+def test_an_admitted_query_moves_on_to_the_search(monkeypatch):
     rig = Rig(monkeypatch, "ALLOW")
 
     events = rig.run("rust vs go")
 
     steps = [(e["step"], e["status"]) for e in events if e["type"] == "progress"]
-    assert steps[:3] == [("guard", "start"), ("guard", "done"), ("agent", "start")]
+    assert steps[:3] == [("guard", "start"), ("guard", "done"), ("seed", "start")]
     assert steps[-1] == ("synthesize_answer", "done")
 
 

@@ -37,5 +37,7 @@ export interface Me {
 export interface Stats {
   count: number
   max_id: number
+  // Absent from a search service that predates it.
+  earliest_timestamp?: string
   latest_timestamp: string
 }

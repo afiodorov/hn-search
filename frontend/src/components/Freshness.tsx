@@ -17,6 +17,13 @@ function describe(iso: string): string {
   })
 }
 
+// The archive is a rolling window, so say where it starts: "since Jan 2023".
+function since(iso: string | undefined): string {
+  const t = iso ? new Date(iso.replace(' ', 'T')) : null
+  if (!t || Number.isNaN(t.getTime())) return ''
+  return ` since ${t.toLocaleDateString(undefined, { year: 'numeric', month: 'short' })}`
+}
+
 export function Freshness() {
   const [stats, setStats] = useState<Stats | null>(null)
 
@@ -33,7 +40,8 @@ export function Freshness() {
   if (!stats || !stats.latest_timestamp) return null
   return (
     <p className="freshness" title={`newest comment: ${stats.latest_timestamp}`}>
-      {stats.count.toLocaleString()} comments · latest{' '}
+      {stats.count.toLocaleString()} comments{since(stats.earliest_timestamp)} ·
+      latest{' '}
       {describe(stats.latest_timestamp)}
     </p>
   )

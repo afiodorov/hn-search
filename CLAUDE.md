@@ -8,9 +8,11 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
 ## Layout
 
 - `hn_search/` — Python web app: FastAPI + SSE API, agentic LangGraph RAG
-  (`rag/agent.py`: a `guard` scope-filter node first, then tool-calling planner +
-  guaranteed baseline search, fused by rank and handed to DeepSeek — see
-  `rag/tools.py` for the `semantic_search`/`similar_comments` tools and
+  (`rag/agent.py`: a `guard` scope-filter node first, then a verbatim seed search
+  and a planner that calls tools in a loop (max 4 rounds, DeepSeek with thinking
+  off — thinking mode rejects multi-turn tool calls via langchain_openai) and picks
+  the sources handed to DeepSeek — see `rag/tools.py` for the
+  `semantic_search`/`similar_comments`/`get_comments` tools and
   `rag/guard.py` for the filter; `rag/translate.py` turns any non-ASCII query
   into English before embedding, since the encoder is English-only), ONNX query
   encoder, Redis cache,
@@ -42,10 +44,13 @@ the tail and are searchable immediately, no rebuild.
 
 Endpoints (all but `/health` need `Authorization: Bearer`):
 `GET /health`, `POST /search` (accepts optional `time_after`/`time_before` ISO8601
-bounds), `POST /similar` (`{hn_id, k?}` — reuses the doc's own stored embedding,
-excludes itself; 404 if not found), `POST /append`, `GET /max_id`,
-`GET /stats` (read token → `{count, max_id, latest_timestamp}`; the web app proxies
-it at `/api/stats`, Redis-cached 5 min, and the UI shows it under the tagline).
+bounds, which binary-search the time-ordered rows to a contiguous range and scan
+only that, so narrow windows still return `k`), `POST /similar` (`{hn_id, k?}` —
+reuses the doc's own stored embedding, excludes itself; 404 if not found),
+`POST /append`, `GET /max_id`, `GET /stats` (read token → `{count, max_id,
+earliest_timestamp, latest_timestamp}`; the web app proxies it at `/api/stats`,
+Redis-cached 5 min, and the UI shows it under the tagline as "N comments since
+Jan 2023 · latest …").
 
 Auth is **two-token**: `HN_SEARCH_TOKEN` (read → `/search`) and
 `HN_SEARCH_ADMIN_TOKEN` (write → `/append`, `/max_id`). Admin is a superset.
@@ -181,6 +186,11 @@ ARTIFACT_DIR=./artifacts PORT=8001 HN_SEARCH_TOKEN=dev ./target/release/rust-sea
   300000ms" while the classifier answers in ~1s). If a run dies anyway, results
   are still stored: `npx promptfoo@latest list evals`, then
   `export eval <id> --output x.json`.
+- A/B two pipeline versions: `misc/eval_compare.py run` each arm (old code from a
+  `git worktree`, under `railway run -s hn-search-web --` for the env; caches are
+  bypassed), then `judge a.jsonl b.jsonl` — blind pairwise DeepSeek judge plus
+  citation/latency stats. Judge an arm against a rerun of itself for the noise
+  floor (~±10 of 108 on 2026-10-06); a real win has to beat it.
 - RAG regression check: `uv run python misc/eval_judge.py` replays
   `evals/production_queries.jsonl` (real logged queries, see `job_manager.py`'s
   `log_eval_record`) through the current pipeline and has an LLM judge flag any

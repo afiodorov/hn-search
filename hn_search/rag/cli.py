@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from .agent import AgentState, create_agent_workflow
+from .agent import create_agent_workflow, initial_state
 
 
 def main():
@@ -17,20 +17,8 @@ def main():
 
     app = create_agent_workflow()
 
-    initial_state = AgentState(
-        messages=[],
-        query=args.query,
-        on_topic=False,
-        tool_calls=[],
-        time_after=None,
-        time_before=None,
-        sources=[],
-        parent_texts={},
-        answer="",
-    )
-
     try:
-        final_state = app.invoke(initial_state)
+        final_state = app.invoke(initial_state(args.query))
 
         print("\n" + "-" * 70)
         print("💬 Answer:")

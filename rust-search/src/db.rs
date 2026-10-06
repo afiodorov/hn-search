@@ -1,8 +1,10 @@
 //! SQLite text/metadata store. `doc.rowid` == logical row index + 1, shared by the
 //! mmap'd base and the appended tail (rowids continue past the base count).
 
+use std::ops::Range;
+
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub struct Doc {
     pub hn_id: String,
@@ -78,6 +80,47 @@ pub fn latest_timestamp(conn: &Connection, max_id: i64) -> Result<String> {
         )
         .ok();
     Ok(v.unwrap_or_default())
+}
+
+/// The logical rows whose timestamp falls inside the inclusive bounds. Rows are
+/// stored in hn_id order (the builder drops ids <= the last one written; /append
+/// only adds ids > max_id), and HN assigns ids at creation, so timestamps rise
+/// with the row index and a time window is one contiguous range. Its edges are
+/// found by binary search: ~log2(total) point lookups, no scan, no extra index.
+pub fn time_range(
+    conn: &Connection,
+    total: usize,
+    after: Option<&str>,
+    before: Option<&str>,
+) -> Result<Range<usize>> {
+    let lo = match after {
+        Some(a) => partition_point(conn, total, |ts| ts < a)?,
+        None => 0,
+    };
+    let hi = match before {
+        Some(b) => partition_point(conn, total, |ts| ts <= b)?,
+        None => total,
+    };
+    Ok(lo..hi.max(lo))
+}
+
+/// First logical row in `0..total` for which `pred(timestamp)` is false. A
+/// missing row counts as false, i.e. as newer than anything.
+fn partition_point(conn: &Connection, total: usize, pred: impl Fn(&str) -> bool) -> Result<usize> {
+    let mut stmt = conn.prepare_cached("SELECT timestamp FROM doc WHERE rowid = ?1")?;
+    let (mut lo, mut hi) = (0, total);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let ts: Option<String> = stmt
+            .query_row([(mid + 1) as i64], |r| r.get(0))
+            .optional()?;
+        if ts.is_some_and(|t| pred(&t)) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
 }
 
 /// Fetch one doc by logical row index (rowid = logical + 1).
@@ -157,4 +200,56 @@ pub fn insert_tail(conn: &mut Connection, start_rowid: i64, docs: &[Doc]) -> Res
     }
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db_with(timestamps: &[&str]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE doc (rowid INTEGER PRIMARY KEY, hn_id TEXT, clean_text TEXT, \
+             author TEXT, timestamp TEXT, type TEXT, parent_id TEXT)",
+            [],
+        )
+        .unwrap();
+        for (i, ts) in timestamps.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO doc (rowid, hn_id, clean_text, author, timestamp, type) \
+                 VALUES (?1, ?2, '', '', ?3, 'comment')",
+                rusqlite::params![i as i64 + 1, (100 + i).to_string(), ts],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn time_range_matches_inclusive_string_bounds() {
+        let conn = db_with(&[
+            "2023-01-01 10:00:00+00:00",
+            "2023-01-02 09:00:00+00:00",
+            "2023-01-02 23:00:00+00:00",
+            "2023-01-03 00:00:00+00:00",
+            "2023-01-05 12:00:00+00:00",
+        ]);
+        let n = 5;
+        assert_eq!(time_range(&conn, n, None, None).unwrap(), 0..5);
+        // Same semantics as the per-row check: keep ts >= after && ts <= before.
+        assert_eq!(time_range(&conn, n, Some("2023-01-02"), Some("2023-01-03")).unwrap(), 1..3);
+        assert_eq!(time_range(&conn, n, Some("2023-01-03"), None).unwrap(), 3..5);
+        assert_eq!(time_range(&conn, n, None, Some("2023-01-01")).unwrap(), 0..0);
+        assert_eq!(time_range(&conn, n, Some("2024-01-01"), None).unwrap(), 5..5);
+        // Inverted bounds give an empty range, not a panic.
+        assert!(time_range(&conn, n, Some("2023-01-05"), Some("2023-01-02")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn time_range_treats_uncommitted_rows_as_newest() {
+        // total can run ahead of SQLite mid-append; those rows sort last.
+        let conn = db_with(&["2023-01-01 10:00:00+00:00", "2023-01-02 10:00:00+00:00"]);
+        assert_eq!(time_range(&conn, 4, Some("2023-01-02"), None).unwrap(), 1..4);
+        assert_eq!(time_range(&conn, 4, None, Some("2023-01-02 23")).unwrap(), 0..2);
+    }
 }

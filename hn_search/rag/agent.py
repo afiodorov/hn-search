@@ -1,56 +1,55 @@
-"""Agentic graph: a tool-calling planner, a guaranteed baseline search, and a
-dedicated synthesis node.
+"""Agentic graph: a planner that searches in a loop, then a dedicated synthesis
+node.
 
-The planner LLM may call semantic_search (optionally date-bounded) or
-similar_comments (by HN id/link) zero or more times if it thinks that helps
-retrieval — but we don't rely on it following instructions to *also* search the
-user's literal query; an LLM can't be fully trusted to follow a "search verbatim"
-instruction (verified empirically: an earlier prompt asked for verbatim-only
-search and the model rewrote it anyway, drifting retrieval away from legacy
-behavior — see eval_judge history). So a plain verbatim semantic_search on the
-user's exact question always runs too, deterministically, outside the LLM's
-control — *except* when the planner called similar_comments, in which case the
-baseline is redundant by construction (the id-based lookup already covers what
-the link/id was pointing at) and skipping it is itself a fixed, code-level rule
-keyed off state, not a new judgment call handed to the LLM: verbatim-embedding a
-query that's mostly a pasted HN link produces junk (comments that merely
-*mention* a URL, not comments related to the linked one), and that junk was
-getting RRF-fused right in with the good similar_comments results. gather_sources
-fuses all result lists by rank (RRF), caps the pool, and resolves each source's
-parent comment (best-effort — most of the corpus predates the parent_id
-backfill) so a short reply that's uninterpretable on its own gets context;
-synthesize_answer drafts the final cited answer from the combined set.
+    guard → seed → agent ⇄ tools → gather_sources → synthesize_answer
 
-The planner's tool-call decisions are captured into `AgentState["tool_calls"]`
-the moment they're made (mirroring `response.tool_calls`), and any facts
-derived from them (e.g. `time_after`/`time_before`, for propagating a date
-filter onto the guaranteed baseline) are computed once in the same node and
-stored as their own state fields too — rather than having every downstream
-node re-derive "what did the planner decide" by re-walking `messages` or
-re-parsing `tool_calls` each time it's needed. `messages` stays LangGraph's
-carrier for LLM conversational history (`ToolNode` needs it in that shape),
-it just isn't pressed into service as the only record of planner decisions.
+The planner LLM decides what to retrieve. It calls semantic_search (optionally
+date-bounded), similar_comments (by HN id/link) and get_comments (full text and
+parent ids) as many times as it finds useful, sees every result before choosing
+its next step, and finishes by naming the comments worth citing. That replaces
+the earlier single-shot design, where code decided how results combined: a
+fixed verbatim search fused by rank with whatever the planner asked for, and
+hand-written exceptions for cases the fusion got wrong (skip the verbatim
+search when a link was pasted, carry the planner's dates over to it). Each new
+kind of question needed another exception. Now the planner looks at the
+results and judges, which covers those cases and new ones like "the first
+mention of X" (search X in an early date window, check, move the window).
 
-Still single-hop for the planner (it can request 1+ tool calls in one turn, which
-ToolNode runs together, but the graph doesn't loop back to the planner after) — a
-real multi-turn loop is a later step, for when a tool's result needs to inform a
-*subsequent* tool choice.
+`seed` is the one fixed step. A plain semantic search on the user's exact
+question runs before the planner's first turn, and its results reach the
+planner as if it had made the call itself. We keep it because a planner left
+alone rewrote queries and drifted retrieval away from what plain search found
+(seen in eval_judge history). The planner starts from those results and can
+still drop them: it picks the final sources, so a verbatim search that was
+noise (a pasted link, say) simply goes unpicked.
+
+The loop is bounded: after `_MAX_ROUNDS` rounds of tool calls the planner is
+asked once more with tools disabled, so it has to finish. If its final reply
+names no usable ids, the sources fall back to every result in the order it was
+found, seed first, so a confused planner never leaves synthesis with nothing.
 
 `guard` runs before any of that. It is the one node that can end the run on its
 own: an off-topic or over-long query routes straight to END with a canned
-refusal, so the planner, the searches and the synthesis call never happen. See
-`guard.py` for why that is a separate model call rather than a line in a prompt.
+refusal, so the seed search, the planner and the synthesis call never happen.
+See `guard.py` for why that is a separate model call rather than a line in a
+prompt.
 """
 
 import functools
 import json
+import re
 from datetime import datetime, timezone
 from typing import Annotated, TypedDict, cast
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
 
 from hn_search.cache_config import cache_answer, get_cached_answer
 from hn_search.logging_config import get_logger
@@ -59,68 +58,74 @@ from hn_search.search_backend import get_docs
 from . import guard
 from .nodes import build_context, build_prompt, make_llm
 from .state import SearchResult
-from .tools import semantic_search, similar_comments
+from .tools import archive_start, get_comments, semantic_search, similar_comments
 
 logger = get_logger(__name__)
 
-_TOOLS = [semantic_search, similar_comments]
-_TOOL_NAMES = {t.name for t in _TOOLS}
+_TOOLS = [semantic_search, similar_comments, get_comments]
+_TOOLS_BY_NAME = {t.name: t for t in _TOOLS}
 _DEFAULT_K = 10
-# Cap on the merged (baseline + agent-added) source pool fed to synthesis, so
-# context size — and DeepSeek latency/cost — doesn't scale with how many extra
-# searches the agent decides to make.
+# Rounds of tool calls before the planner must finish. One round is one planner
+# turn (~2s) plus its searches; synthesis (~20s) dominates either way.
+_MAX_ROUNDS = 4
+# Cap on the sources fed to synthesis, so context size — and DeepSeek
+# latency/cost — doesn't scale with how much the planner searched.
 _MAX_SOURCES = 12
-# Standard Reciprocal Rank Fusion constant (Cormack et al. 2009); dampens the
-# influence of any single list's exact rank so cross-list consensus matters more
-# than any one query embedding's raw distance scale.
-_RRF_K = 60
+# How much of each result the planner sees. Enough to judge relevance; it can
+# get_comments for the full text.
+_SNIPPET_CHARS = 300
 # Cap how much of a parent comment's text gets pulled into the prompt — enough
 # for it to give context, not so much a single long thread derails the budget.
 _PARENT_TEXT_MAX_CHARS = 600
+_SEED_CALL_ID = "seed"
 
+_SYSTEM_PROMPT = """You are the research planner for a search assistant over \
+Hacker News comments. Today's date is {today}. The archive holds HN comments and \
+stories from {archive_start} to today; nothing older is in it.
 
-def _reciprocal_rank_fusion(
-    result_lists: list[list[SearchResult]], k: int = _RRF_K, limit: int = _MAX_SOURCES
-) -> list[SearchResult]:
-    """Fuse several ranked result lists (e.g. baseline search + each agent-added
-    search) by rank rather than raw distance — raw cosine distances from
-    different query embeddings aren't on a comparable scale, but rank position
-    within a list always is."""
-    scores: dict[str, float] = {}
-    docs: dict[str, SearchResult] = {}
-    for results in result_lists:
-        for rank, doc in enumerate(results, start=1):
-            doc_id = doc["id"]
-            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
-            docs.setdefault(doc_id, doc)
-    ranked_ids = sorted(scores, key=lambda i: scores[i], reverse=True)
-    return [docs[i] for i in ranked_ids[:limit]]
+Your job is to find the comments that answer the user's question. A separate \
+step writes the answer from the comments you pick; never answer the question \
+yourself. A plain semantic search for the user's exact words has already run, \
+and its results are below. Look at them, then decide what else, if anything, to \
+search.
 
+Tools:
+- semantic_search(query, k, time_after, time_before): comments similar in \
+meaning to the query, best match first. It ranks by meaning, not date. \
+time_after/time_before (YYYY-MM-DD, inclusive) return the best matches inside \
+that window, however narrow.
+- similar_comments(hn_id): comments like a given comment.
+- get_comments(hn_ids): full text of comments by id, with each one's parent_id, \
+for reading a comment in full or walking up a thread.
 
-_SYSTEM_PROMPT = (
-    "You are the retrieval planner for a Hacker News search assistant. Today's "
-    "date is {today}. A plain semantic search on the user's exact question always "
-    "runs automatically, regardless of what you do, so you do not need to (and "
-    "should not bother to) search the verbatim question yourself. Your job is to "
-    "decide whether ANY ADDITIONAL tool calls would surface better results on top "
-    "of that baseline:\n\n"
-    "- If the question contains a news.ycombinator.com/item?id=... link or a bare "
-    "HN comment id, and the user wants comments *like* or *related to* it, call "
-    "similar_comments with that id instead of (or in addition to) semantic_search "
-    "— it reuses the comment's own embedding directly, no need to describe its "
-    "content in words.\n"
-    "- If the question mentions a time period ('last 6 months', 'since 2023', "
-    "'in 2022'), call semantic_search with time_after/time_before set to the "
-    "actual ISO8601 dates you compute from today's date (the automatic baseline "
-    "search will pick up and reuse the same bounds automatically).\n"
-    "- Otherwise, call semantic_search again with a rewritten or clarified query "
-    "if the question is ambiguous or colloquially phrased, a narrower or broader "
-    "phrasing, or a couple of separate calls to cover distinct aspects of a "
-    "compound question.\n\n"
-    "Call tools as many times as genuinely useful (rarely more than two or three "
-    "extra calls), or not at all if the baseline is clearly sufficient. Never "
-    "attempt to answer the question yourself — a separate step drafts the final "
-    "answer from all search results gathered."
+How to search well:
+- If the results you already have answer the question, finish straight away.
+- Rephrase a vague or colloquial question in the words commenters would use. \
+Search each side of a comparison, and each part of a compound question, on its own.
+- For a time period ("last 3 months", "in 2024", "recently"), set \
+time_after/time_before, computed from today's date.
+- For a news.ycombinator.com/item?id=... link or a bare comment id, call \
+similar_comments with that id; the plain search on a pasted link is usually noise.
+- For "the first mention of X", "when did people start talking about X" or "the \
+earliest comment about X": search X in a narrow window (days or weeks) starting \
+at the archive start, or at when X is known to have appeared if that is later. \
+Check that the hits actually mention X, and move the window later until they do. \
+If X is older than the archive, its earliest hits sit at the archive start; say \
+so in your notes.
+- You have at most {max_rounds} rounds of tool calls. Make independent searches \
+in the same round.
+
+When you are done, reply with no tool calls and only this JSON:
+{{"sources": ["<id>", ...], "notes": "<one or two sentences for the writer>"}}
+sources: up to {max_sources} ids from the results you have seen, most useful \
+first, only ones that help answer the question; for a first-mention question, \
+oldest first. notes: what the writer needs to know that the comments don't say \
+themselves, e.g. the date window you searched, or that the topic is older than \
+the archive. Leave notes empty if there is nothing to add."""
+
+_FINISH_NOW = (
+    "That was your last round of searches. Reply now with only the JSON: "
+    '{"sources": [...], "notes": "..."}'
 )
 
 
@@ -129,74 +134,186 @@ class AgentState(TypedDict):
     query: str
     # Set by the guard node and read only by the router after it.
     on_topic: bool
+    # Rounds of tool calls run so far.
+    rounds: int
+    # Every tool call made, the seed included, in order: what was searched.
     tool_calls: list[dict]
-    time_after: str | None
-    time_before: str | None
+    # Every result any tool returned, by id, in the order first found.
+    pool: dict[str, SearchResult]
+    notes: str
     sources: list[SearchResult]
     parent_texts: dict[str, str]
     answer: str
 
 
-def _guard_node(state: AgentState) -> AgentState:
+def initial_state(query: str) -> AgentState:
+    return AgentState(
+        messages=[],
+        query=query,
+        on_topic=False,
+        rounds=0,
+        tool_calls=[],
+        pool={},
+        notes="",
+        sources=[],
+        parent_texts={},
+        answer="",
+    )
+
+
+def _guard_node(state: AgentState) -> dict:
     """Admit or refuse. A refusal fills in `answer` itself (and an empty
     `sources`), which is all a downstream consumer needs to render it."""
     query = state["query"]
     if len(query) > guard.MAX_QUERY_CHARS:
         # Free: no model call for a pasted document.
-        return {
-            **state,
-            "on_topic": False,
-            "answer": guard.TOO_LONG_TEXT,
-            "sources": [],
-        }
+        return {"on_topic": False, "answer": guard.TOO_LONG_TEXT, "sources": []}
     if guard.is_in_scope(query):  # fails open; never raises
-        return {**state, "on_topic": True}
-    return {**state, "on_topic": False, "answer": guard.REFUSAL_TEXT, "sources": []}
+        return {"on_topic": True}
+    return {"on_topic": False, "answer": guard.REFUSAL_TEXT, "sources": []}
 
 
 def _admitted(state: AgentState) -> str:
-    return "agent" if state["on_topic"] else END
+    return "seed" if state["on_topic"] else END
 
 
-def _agent_node(state: AgentState) -> AgentState:
-    messages = state["messages"]
-    if not messages:
-        today = datetime.now(timezone.utc).date().isoformat()
-        messages = [
-            SystemMessage(content=_SYSTEM_PROMPT.format(today=today)),
-            HumanMessage(content=state["query"]),
-        ]
-    # Deterministic tool selection: which extra searches (if any) get made should
-    # be repeatable given the same query, so the eval set has a stable target to
-    # snapshot against — only the final answer's prose needs variety.
-    llm = make_llm(temperature=0).bind_tools(_TOOLS)
-    response = llm.invoke(messages)
-    # .invoke()'s static return type is the generic BaseMessage; tool_calls is
-    # only on AIMessage, which is what a tool-bound chat model always returns.
-    tool_calls = getattr(response, "tool_calls", None) or []
-    time_after, time_before = _agent_time_bounds(tool_calls)
+def _format_results(results: list[SearchResult]) -> str:
+    """What the planner reads: one compact block per result, id first, so it
+    can name ids back in its selection."""
+    if not results:
+        return "No results."
+    blocks = []
+    for r in results:
+        text = r["text"]
+        if len(text) > _SNIPPET_CHARS:
+            text = text[:_SNIPPET_CHARS] + "…"
+        blocks.append(f"[{r['id']}] {r['author']} · {str(r['timestamp'])[:10]}\n{text}")
+    return f"{len(results)} results:\n\n" + "\n\n".join(blocks)
+
+
+def _add_to_pool(
+    pool: dict[str, SearchResult], results: list[SearchResult]
+) -> dict[str, SearchResult]:
+    merged = dict(pool)
+    for r in results:
+        merged.setdefault(r["id"], r)
+    return merged
+
+
+def _run_tool(name: str, args: dict) -> tuple[list[SearchResult], str]:
+    """Run one tool call; return its results and what the planner is shown. A
+    failing call (bad id, service hiccup) is reported to the planner as text,
+    so it can try something else, rather than ending the run."""
+    tool = _TOOLS_BY_NAME.get(name)
+    if tool is None:
+        return [], f"Unknown tool {name!r}."
+    try:
+        results = cast(list[SearchResult], tool.invoke(args))
+    except Exception as e:
+        logger.warning(f"tool {name} failed: {e}")
+        return [], f"The call failed: {e}"
+    return results, _format_results(results)
+
+
+def _seed_node(state: AgentState) -> dict:
+    """The verbatim search, recorded as the planner's own first tool call so
+    the conversation reads naturally from its first turn."""
+    query = state["query"]
+    today = datetime.now(timezone.utc).date().isoformat()
+    call = {
+        "name": semantic_search.name,
+        "args": {"query": query, "k": _DEFAULT_K},
+        "id": _SEED_CALL_ID,
+        "type": "tool_call",
+    }
+    results, shown = _run_tool(call["name"], call["args"])
     return {
-        **state,
-        "messages": messages + [response],
-        "tool_calls": tool_calls,
-        "time_after": time_after,
-        "time_before": time_before,
+        "messages": [
+            SystemMessage(
+                content=_SYSTEM_PROMPT.format(
+                    today=today,
+                    archive_start=archive_start(),
+                    max_rounds=_MAX_ROUNDS,
+                    max_sources=_MAX_SOURCES,
+                )
+            ),
+            HumanMessage(content=query),
+            AIMessage(content="", tool_calls=[call]),
+            ToolMessage(content=shown, tool_call_id=_SEED_CALL_ID, name=call["name"]),
+        ],
+        "tool_calls": [call],
+        "pool": _add_to_pool(state["pool"], results),
     }
 
 
-def _agent_time_bounds(tool_calls: list[dict]) -> tuple[str | None, str | None]:
-    """If the planner applied a date filter to any of its own searches, the
-    guaranteed baseline search should respect it too — otherwise an unfiltered
-    baseline leaks stale results back into a deliberately date-scoped query via
-    RRF fusion, defeating the point of the filter. Takes the first bound found;
-    in practice the planner applies the same window to every call it makes for
-    one query."""
-    for tc in tool_calls:
-        args = tc.get("args", {})
-        after, before = args.get("time_after"), args.get("time_before")
-        if after or before:
-            return after, before
-    return None, None
+def _agent_node(state: AgentState) -> dict:
+    # Deterministic tool selection: which searches get made should be
+    # repeatable given the same query, so the eval set has a stable target to
+    # compare against — only the final answer's prose needs variety.
+    llm = make_llm(temperature=0, thinking=False)
+    if state["rounds"] >= _MAX_ROUNDS:
+        bound = llm.bind_tools(_TOOLS, tool_choice="none")
+        messages = [*state["messages"], HumanMessage(content=_FINISH_NOW)]
+    else:
+        bound = llm.bind_tools(_TOOLS)
+        messages = state["messages"]
+    response = bound.invoke(messages)
+    if state["rounds"] >= _MAX_ROUNDS:
+        return {"messages": [messages[-1], response]}
+    return {"messages": [response]}
+
+
+def _wants_tools(state: AgentState) -> str:
+    last = state["messages"][-1]
+    return "tools" if getattr(last, "tool_calls", None) else "gather_sources"
+
+
+def _tools_node(state: AgentState) -> dict:
+    """Run every call from the planner's last turn (a round), add the results
+    to the pool and hand them back to it."""
+    last = cast(AIMessage, state["messages"][-1])
+    pool = state["pool"]
+    replies: list[BaseMessage] = []
+    for call in last.tool_calls:
+        results, shown = _run_tool(call["name"], call.get("args", {}))
+        pool = _add_to_pool(pool, results)
+        replies.append(
+            ToolMessage(content=shown, tool_call_id=call["id"], name=call["name"])
+        )
+    return {
+        "messages": replies,
+        "rounds": state["rounds"] + 1,
+        "tool_calls": [*state["tool_calls"], *last.tool_calls],
+        "pool": pool,
+    }
+
+
+_ID = re.compile(r"\b\d{5,}\b")
+
+
+def _parse_selection(content: str) -> tuple[list[str], str]:
+    """The planner's final reply → (ids, notes). Expects the JSON the prompt
+    asks for, possibly fenced; failing that, takes any ids it mentions, so a
+    planner that answers in prose still has its picks honoured."""
+    text = content.strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            ids = [str(i) for i in data.get("sources", [])]
+            return ids, str(data.get("notes") or "").strip()
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return _ID.findall(text), ""
+
+
+def _select_sources(
+    pool: dict[str, SearchResult], picked: list[str]
+) -> list[SearchResult]:
+    chosen = [pool[i] for i in dict.fromkeys(picked) if i in pool]
+    if not chosen:
+        chosen = list(pool.values())
+    return chosen[:_MAX_SOURCES]
 
 
 def _fetch_parent_texts(sources: list[SearchResult]) -> dict[str, str]:
@@ -242,116 +359,37 @@ def _fetch_parent_texts(sources: list[SearchResult]) -> dict[str, str]:
     return result
 
 
-def _run_baseline_search(
-    query: str, time_after: str | None, time_before: str | None
-) -> list[SearchResult]:
-    return semantic_search.invoke(
-        {
-            "query": query,
-            "k": _DEFAULT_K,
-            "time_after": time_after,
-            "time_before": time_before,
-        }
-    )
+def _gather_sources(state: AgentState) -> dict:
+    """The planner's picks, in its order, from everything it found."""
+    final = state["messages"][-1]
+    picked, notes = _parse_selection(str(getattr(final, "content", "") or ""))
+    sources = _select_sources(state["pool"], picked)
+    return {
+        "sources": sources,
+        "notes": notes,
+        "parent_texts": _fetch_parent_texts(sources),
+    }
 
 
-def _fetch_referenced_docs(tool_calls: list[dict]) -> list[SearchResult]:
-    """similar_comments deliberately excludes the referenced comment from its
-    own results (it reuses that comment's embedding to find *other* similar
-    ones) — correct for retrieval, but it means synthesis never sees the exact
-    comment the user asked about, only comments around it (confirmed: DeepSeek
-    noticed the gap and said as much in an answer). Fetch it directly and feed
-    it in as its own rank-1 result list, so it merges in like any other source
-    and becomes a normal numbered citation instead of a silent omission."""
-    ids = [
-        tc["args"]["hn_id"]
-        for tc in tool_calls
-        if tc["name"] == "similar_comments" and tc.get("args", {}).get("hn_id")
-    ]
-    if not ids:
-        return []
-    try:
-        docs = get_docs(ids)
-    except Exception:
-        logger.exception("referenced-comment lookup failed")
-        return []
-    return [
-        SearchResult(
-            id=d["id"],
-            author=d["author"],
-            type=d["type"],
-            text=d["clean_text"],
-            timestamp=d["timestamp"],
-            distance=0.0,
-        )
-        for d in docs.values()
-    ]
-
-
-def _gather_sources(state: AgentState) -> AgentState:
-    """Run the guaranteed verbatim baseline search, then fuse it by rank (RRF)
-    with whatever the planner agent additionally searched for.
-
-    The baseline is skipped when the planner called similar_comments: the
-    baseline would embed the user's raw text (often mostly a pasted HN link) as
-    if it were a search query, which produces junk — comments that merely
-    mention a URL, not comments related to the linked one — that then pollutes
-    the RRF-fused result via similar_comments' own, correct results. Skipping
-    is a fixed rule keyed off state (state["tool_calls"]), not a judgment call
-    handed back to the LLM. When similar_comments fires, the referenced
-    comment's own text is fetched and merged in too (see
-    _fetch_referenced_docs) so synthesis has it, not just its neighbors.
-    """
-    tool_calls = state["tool_calls"]
-    time_after, time_before = state["time_after"], state["time_before"]
-    used_similar = any(tc["name"] == "similar_comments" for tc in tool_calls)
-
-    verbatim_results: list[SearchResult] = (
-        []
-        if used_similar
-        else _run_baseline_search(state["query"], time_after, time_before)
-    )
-    referenced_results = _fetch_referenced_docs(tool_calls) if used_similar else []
-
-    agent_result_lists: list[list[SearchResult]] = []
-    for m in state["messages"]:
-        if getattr(m, "type", None) == "tool" and m.name in _TOOL_NAMES:
-            content = m.content
-            if isinstance(content, str):
-                try:
-                    content = json.loads(content)
-                except json.JSONDecodeError:
-                    content = []
-            agent_result_lists.append(content)
-
-    merged = _reciprocal_rank_fusion(
-        [referenced_results, verbatim_results, *agent_result_lists]
-    )
-    if not merged:
-        # Safety net: skipping the baseline (or the planner's own tool calls
-        # returning nothing) must never leave us with zero sources.
-        merged = _reciprocal_rank_fusion(
-            [_run_baseline_search(state["query"], time_after, time_before)]
-        )
-    parent_texts = _fetch_parent_texts(merged)
-
-    return {**state, "sources": merged, "parent_texts": parent_texts}
-
-
-def _synthesize_answer(state: AgentState) -> AgentState:
+def _synthesize_answer(state: AgentState) -> dict:
     query = state["query"]
+    notes = state["notes"]
     context = build_context(state["sources"], state["parent_texts"])
+    # The notes shape the answer as much as the sources do, so they are part of
+    # what the cached answer is keyed on.
+    cache_context = f"{notes}\n\n{context}" if notes else context
 
-    cached_answer = get_cached_answer(query, context)
+    cached_answer = get_cached_answer(query, cache_context)
     if cached_answer:
-        return {**state, "answer": cached_answer}
+        return {"answer": cached_answer}
 
     llm = make_llm()
+    prompt = build_prompt(query, context, notes=notes, archive_start=archive_start())
     # DeepSeek's chat completions are text-only, so .content is always a plain
     # str here despite BaseMessage's broader str | list[...] type.
-    answer = cast(str, llm.invoke(build_prompt(query, context)).content)
-    cache_answer(query, context, answer)
-    return {**state, "answer": answer}
+    answer = cast(str, llm.invoke(prompt).content)
+    cache_answer(query, cache_context, answer)
+    return {"answer": answer}
 
 
 @functools.cache
@@ -361,17 +399,19 @@ def create_agent_workflow():
     workflow = StateGraph(AgentState)
 
     workflow.add_node("guard", _guard_node)
+    workflow.add_node("seed", _seed_node)
     workflow.add_node("agent", _agent_node)
-    workflow.add_node("tools", ToolNode(_TOOLS))
+    workflow.add_node("tools", _tools_node)
     workflow.add_node("gather_sources", _gather_sources)
     workflow.add_node("synthesize_answer", _synthesize_answer)
 
     workflow.set_entry_point("guard")
-    workflow.add_conditional_edges("guard", _admitted, {"agent": "agent", END: END})
+    workflow.add_conditional_edges("guard", _admitted, {"seed": "seed", END: END})
+    workflow.add_edge("seed", "agent")
     workflow.add_conditional_edges(
-        "agent", tools_condition, {"tools": "tools", END: "gather_sources"}
+        "agent", _wants_tools, {"tools": "tools", "gather_sources": "gather_sources"}
     )
-    workflow.add_edge("tools", "gather_sources")
+    workflow.add_edge("tools", "agent")
     workflow.add_edge("gather_sources", "synthesize_answer")
     workflow.add_edge("synthesize_answer", END)
 

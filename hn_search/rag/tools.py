@@ -1,12 +1,13 @@
 """Tools for the agentic retrieval loop."""
 
+import functools
 from typing import cast
 
 from langchain_core.tools import tool
 
 from hn_search.cache_config import cache_vector_search, get_cached_vector_search
 from hn_search.common import get_model
-from hn_search.search_backend import search, similar
+from hn_search.search_backend import get_docs, search, similar, stats
 
 from .nodes import results_to_cache_data, rows_to_results
 from .state import SearchResult
@@ -22,10 +23,11 @@ def semantic_search(
 ) -> list[SearchResult]:
     """Search Hacker News comments and stories by semantic similarity to a query.
 
-    time_after/time_before optionally restrict results to a date range — pass
-    ISO8601 dates (YYYY-MM-DD) if the user's question mentions a time period
-    (e.g. "in the last 6 months", "since 2023", "in 2022"); compute the actual
-    dates yourself from today's date. Omit both for an unrestricted search.
+    Ranks by meaning, not by date. time_after/time_before (YYYY-MM-DD,
+    inclusive) restrict the search to that window and return the best matches
+    inside it, however narrow — use them for a time period the user names, and
+    for finding when something was first discussed. Omit both for an
+    unrestricted search.
 
     Returns up to k results, each with id, author, timestamp, type, text, and
     distance (lower = more relevant).
@@ -56,3 +58,44 @@ def similar_comments(hn_id: str, k: int = 10) -> list[SearchResult]:
     """
     rows = similar(hn_id, k)
     return results_to_cache_data(rows_to_results(rows))
+
+
+@tool
+def get_comments(hn_ids: list[str]) -> list[SearchResult]:
+    """Fetch comments by id, in full. Use it to read a comment a search only
+    showed the start of, or to walk up a thread: each result's text is
+    followed by its parent_id, which you can fetch in turn. Unknown ids are
+    skipped."""
+    docs = get_docs(hn_ids)
+    return [
+        SearchResult(
+            id=d["id"],
+            author=d["author"],
+            type=d["type"],
+            text=d["clean_text"]
+            + (f"\n(parent_id: {d['parent_id']})" if d.get("parent_id") else ""),
+            timestamp=d["timestamp"],
+            distance=0.0,
+        )
+        for d in docs.values()
+    ]
+
+
+# What the archive held when this was written; used only if the service can't
+# say (it predates `earliest_timestamp` in /stats, or it is down).
+_FALLBACK_ARCHIVE_START = "2023-01-01"
+
+
+@functools.cache
+def _archive_start_from_service() -> str:
+    return stats()["earliest_timestamp"][:10]
+
+
+def archive_start() -> str:
+    """The date of the oldest comment in the archive (YYYY-MM-DD). The service
+    is asked once per process; a failure isn't cached, so it is asked again
+    next time."""
+    try:
+        return _archive_start_from_service()
+    except Exception:
+        return _FALLBACK_ARCHIVE_START

@@ -16,9 +16,10 @@ question with cited sources.
 - 🦀 **Purpose-built Rust search service**: binary-quantized Hamming brute-force +
   float16 exact rerank over `mmap`'d flat files — **~1.1 GB RAM for 12M vectors**,
   proven **recall@10 = 1.000** vs exact cosine
-- 🤖 **Agentic RAG**: a LangGraph tool-calling planner (semantic search — optionally
-  date-bounded — and "find comments like this HN link") fused by rank (RRF) with a
-  guaranteed verbatim baseline search, then DeepSeek drafts the cited answer
+- 🤖 **Agentic RAG**: a LangGraph planner that searches in a loop (semantic search —
+  optionally date-bounded — "find comments like this HN link", and reading comments
+  in full), sees each round's results, picks the sources, then DeepSeek drafts the
+  cited answer
 - ⚡ **ONNX query encoder**: serve without torch (~300 MB instead of ~1.5 GB RAM)
 - 🔄 **Online updates**: daily incremental `/append`, no index rebuild
 - 🔐 **Two-token auth**: read token on the public web app, admin (write) token only
@@ -41,11 +42,15 @@ question with cited sources.
   daily update (laptop):  /max_id → BigQuery (id>max) → ONNX embed → HTTPS /append → tail
 ```
 
-Simplified above: the LangGraph planner sits in front of `/search` — it always runs a
-verbatim baseline search, and can additionally call `/search` again with a rewritten
-query or date bounds, or `/similar {hn_id}` (reusing a comment's own stored embedding,
-no reembedding) when the question references a specific HN link — before all result
-lists are fused by rank (RRF) and handed to DeepSeek. See `hn_search/rag/agent.py`.
+Simplified above: the LangGraph planner sits in front of `/search`. A verbatim search
+on the question runs first and is the planner's first observation; from there it
+calls `/search` again with rewritten queries or date bounds, `/similar {hn_id}`
+(reusing a comment's own stored embedding, no reembedding) for a specific HN link, or
+`/docs` to read comments in full — up to four rounds, each informed by the last —
+and finishes by naming the comments worth citing, which go to DeepSeek. Date bounds
+narrow the Rust scan itself (rows are stored in time order, so a window is one
+contiguous slice), so a one-week window still returns `k` results — which is also
+how it answers "the first mention of X". See `hn_search/rag/agent.py`.
 
 ### Guardrails
 
