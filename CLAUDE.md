@@ -18,7 +18,8 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
   encoder, Redis cache,
   `search_backend.py` (talks to the Rust service).
 - `rust-search/` — the search service (axum, rayon, memmap2, rusqlite, half).
-  `src/main.rs` is the HTTP layer; `index.rs`/`quantize.rs`/`db.rs` do the work.
+  `src/main.rs` is the HTTP layer; `index.rs`/`quantize.rs`/`db.rs` do the work;
+  `fts.rs` is the full-text index behind `/keyword`.
 - `misc/` — data pipeline: BigQuery fetch, GPU/CPU embedding, artifact build, the
   daily incremental updater.
 - `frontend/` — React UI; `npm run build` emits assets the API serves.
@@ -50,7 +51,10 @@ reuses the doc's own stored embedding, excludes itself; 404 if not found),
 `POST /append`, `GET /max_id`, `GET /stats` (read token → `{count, max_id,
 earliest_timestamp, latest_timestamp}`; the web app proxies it at `/api/stats`,
 Redis-cached 5 min, and the UI shows it under the tagline as "N comments since
-Jan 2023 · latest …").
+Jan 2023 · latest …"), `POST /keyword` (read token, `{term, time_after?,
+time_before?, k?}` → exact `{count, rows, first, months}` from `fts.sqlite`; 503
+when that file isn't there). The planner reaches it as the `keyword_stats` tool,
+outside agents as MCP `keyword` / `/api/keyword`.
 
 Auth is **two-token**: `HN_SEARCH_TOKEN` (read → `/search`) and
 `HN_SEARCH_ADMIN_TOKEN` (write → `/append`, `/max_id`). Admin is a superset.
@@ -124,7 +128,24 @@ confirms it came up. The **tail persists across restarts** (`tail_codes.bin` /
 Use `REMOTE=hnsearch rust-search/scripts/rsync_artifacts.sh` (atomic release dir +
 symlink flip). A fresh base ships with an empty tail; the next updater re-appends
 `id > max_id` from BigQuery. Only flip a release built from a complete, up-to-date
-dump.
+dump. A new release dir has no `fts.sqlite` (its rowids would not match), so
+`/keyword` is off until the index is rebuilt for it, see below.
+
+### The full-text index (`fts.sqlite`)
+
+A contentless FTS5 index keyed by `doc.rowid`, in its own file next to
+`docs.sqlite`. **Built on a dev machine, not on the box** (the build would evict
+the vector index from the box's 8 GB page cache):
+`uv run python misc/build_fts.py --remote hnsearch --out data/fts/fts.sqlite`
+streams `rowid, clean_text` over ssh at idle I/O priority (one read of
+docs.sqlite) and indexes locally; on 2026-10-06 it took ~12 min for 13.26M rows
+and came to 2.27 GB. Ship with the rsync + atomic `mv` + restart in that
+script's docstring. The service indexes any rows past the file's
+`fts_meta.max_rowid` at startup and after every `/append`, so a file built from
+an older snapshot catches up by itself; rebuild only after a full artifact
+rebuild. Tokenizer is `unicode61`: whole words, case-insensitive, punctuation
+and symbols dropped ("C++" is "c"); terms are quoted as one phrase, so FTS5
+syntax in user input is searched literally.
 
 ## Updating the corpus
 

@@ -1,13 +1,13 @@
 """Tools for the agentic retrieval loop."""
 
 import functools
-from typing import cast
+from typing import TypedDict, cast
 
 from langchain_core.tools import tool
 
 from hn_search.cache_config import cache_vector_search, get_cached_vector_search
 from hn_search.common import get_model
-from hn_search.search_backend import get_docs, search, similar, stats
+from hn_search.search_backend import get_docs, keyword, search, similar, stats
 
 from .nodes import results_to_cache_data, rows_to_results
 from .state import SearchResult
@@ -79,6 +79,64 @@ def get_comments(hn_ids: list[str]) -> list[SearchResult]:
         )
         for d in docs.values()
     ]
+
+
+class Month(TypedDict):
+    month: str
+    count: int
+    rows: int
+
+
+class KeywordStats(TypedDict):
+    term: str
+    time_after: str | None
+    time_before: str | None
+    count: int
+    rows: int
+    first: list[SearchResult]
+    months: list[Month]
+
+
+@tool
+def keyword_stats(
+    term: str,
+    time_after: str | None = None,
+    time_before: str | None = None,
+    k: int = 5,
+) -> KeywordStats:
+    """Exact counts of comments containing a word or phrase, from a full-text
+    index over the whole archive: how many comments mention it, how many per
+    month (with each month's total comments, since volume varies), and the k
+    earliest comments that mention it, oldest first.
+
+    Matching is on whole words, case-insensitive, punctuation ignored; a
+    multi-word term must appear as that phrase. It counts comments, not
+    occurrences, and words, not meanings: "llm" does not match "large
+    language model". Symbols are dropped, so "C++" is just "c". Use it for
+    "how many", "how often", "when did people start", "first mention", and
+    trends over time. time_after/time_before (YYYY-MM-DD, inclusive) bound it.
+    """
+    out = keyword(term, time_after, time_before, k)
+    first = [
+        SearchResult(
+            id=d["id"],
+            author=d["author"],
+            type=d["type"],
+            text=d["clean_text"],
+            timestamp=d["timestamp"],
+            distance=0.0,
+        )
+        for d in out["first"]
+    ]
+    return KeywordStats(
+        term=out["term"],
+        time_after=time_after,
+        time_before=time_before,
+        count=out["count"],
+        rows=out["rows"],
+        first=first,
+        months=out["months"],
+    )
 
 
 # What the archive held when this was written; used only if the service can't

@@ -10,8 +10,11 @@
 //!   POST /append  {rows:[{hn_id, clean_text, author, timestamp, type, embedding, parent_id?}]}
 //!   GET  /max_id  -> {max_id}
 //!   GET  /stats   -> {count, max_id, earliest_timestamp, latest_timestamp}  (read token)
+//!   POST /keyword {term, time_after?, time_before?, k?} -> {count, rows, first, months}
+//!                 exact counts from the full-text index (fts.rs); 503 without fts.sqlite
 
 mod db;
+mod fts;
 mod index;
 mod quantize;
 
@@ -40,6 +43,9 @@ struct AppState {
     shortlist: usize,
     /// Timestamp of row 0, the oldest doc; fixed until the next full rebuild.
     earliest_timestamp: String,
+    /// The full-text index, when `fts.sqlite` was shipped. Lock order where
+    /// both are held: tail, then db, then fts.
+    fts: Option<Mutex<Connection>>,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +59,26 @@ struct SearchReq {
     /// index, so a narrow window still returns `k` in-window results.
     time_after: Option<String>,
     time_before: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct KeywordReq {
+    term: String,
+    time_after: Option<String>,
+    time_before: Option<String>,
+    /// How many of the earliest matches to return in full (default 5, max 50).
+    k: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct KeywordResp {
+    term: String,
+    /// Comments in the window containing the term (as a phrase).
+    count: usize,
+    /// All comments in the window.
+    rows: usize,
+    first: Vec<DocHit>,
+    months: Vec<fts::Month>,
 }
 
 #[derive(Deserialize)]
@@ -339,6 +365,52 @@ async fn docs(
     Ok(Json(hits))
 }
 
+async fn keyword(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<KeywordReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_read(&state, &headers)?;
+    if state.fts.is_none() {
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "no full-text index on this server"));
+    }
+    let term = req.term.trim().to_string();
+    if term.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "term must not be empty"));
+    }
+    let k = req.k.unwrap_or(5).min(50);
+
+    let resp = tokio::task::spawn_blocking(move || -> Result<KeywordResp, String> {
+        let tail = state.tail.read().unwrap();
+        let total = state.base.count + tail.count;
+        let conn = state.db.lock().unwrap();
+        let rows = db::time_range(&conn, total, req.time_after.as_deref(), req.time_before.as_deref())
+            .map_err(|e| e.to_string())?;
+        let fts = state.fts.as_ref().unwrap().lock().unwrap();
+        let stats = fts::stats(&fts, &conn, total, &term, rows, k).map_err(|e| e.to_string())?;
+        drop(fts);
+        let mut first = Vec::with_capacity(stats.first.len());
+        for idx in stats.first {
+            if let Some(d) = db::fetch(&conn, idx).map_err(|e| e.to_string())? {
+                first.push(DocHit {
+                    id: d.hn_id,
+                    clean_text: d.clean_text,
+                    author: d.author,
+                    timestamp: d.timestamp,
+                    doc_type: d.doc_type,
+                    parent_id: d.parent_id,
+                });
+            }
+        }
+        Ok(KeywordResp { term, count: stats.count, rows: stats.rows, first, months: stats.months })
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(resp))
+}
+
 async fn append(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -395,6 +467,13 @@ async fn append(
             tail.append(&vecs, new_max, &new_latest)
                 .map_err(|e| e.to_string())?;
             db::insert_tail(&mut conn, start_rowid, &docs).map_err(|e| e.to_string())?;
+            // Best-effort: the docs are committed either way, and a failed or
+            // skipped index update is caught up by the next sync.
+            if let Some(fts) = &state.fts {
+                if let Err(e) = fts::sync(&mut fts.lock().unwrap(), &conn) {
+                    eprintln!("fts sync after append failed: {e}");
+                }
+            }
         }
         Ok(AppendResp {
             appended,
@@ -435,6 +514,23 @@ async fn main() -> anyhow::Result<()> {
     let latest_timestamp = db::latest_timestamp(&conn, start_max_id)?;
     let earliest_timestamp = db::fetch(&conn, 0)?.map(|d| d.timestamp).unwrap_or_default();
 
+    // Opened only if shipped: fts::open would otherwise create an empty one.
+    let fts_path = dir.join("fts.sqlite");
+    let fts = if fts_path.exists() {
+        let mut f = fts::open(&fts_path)?;
+        let t = std::time::Instant::now();
+        let added = fts::sync(&mut f, &conn)?;
+        eprintln!(
+            "fts: indexed {added} new rows in {:.1}s, max_rowid={}",
+            t.elapsed().as_secs_f32(),
+            fts::max_rowid(&f)?
+        );
+        Some(Mutex::new(f))
+    } else {
+        eprintln!("fts: no {fts_path:?}; /keyword disabled");
+        None
+    };
+
     let base = Base::open(&dir, meta.count)?;
     let tail = Tail::load(&dir, meta.count, sqlite_total, start_max_id, latest_timestamp)?;
     eprintln!(
@@ -456,6 +552,7 @@ async fn main() -> anyhow::Result<()> {
         admin_token,
         shortlist,
         earliest_timestamp,
+        fts,
     });
 
     let app = Router::new()
@@ -463,6 +560,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/search", post(search))
         .route("/similar", post(similar))
         .route("/docs", post(docs))
+        .route("/keyword", post(keyword))
         // axum defaults request bodies to 2MB; /append batches are several MB of
         // JSON embeddings, so lift the cap to match Caddy's 64MB.
         .route(

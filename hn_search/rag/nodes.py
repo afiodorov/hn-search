@@ -75,7 +75,11 @@ def build_context(
 
 
 def build_prompt(
-    query: str, context: str, notes: str = "", archive_start: str | None = None
+    query: str,
+    context: str,
+    notes: str = "",
+    archive_start: str | None = None,
+    facts: str = "",
 ) -> str:
     archive = (
         f"\nThe archive holds Hacker News comments from {archive_start} onward; "
@@ -84,6 +88,13 @@ def build_prompt(
         else ""
     )
     research = f"\nNotes from the research step: {notes}\n" if notes else ""
+    if facts:
+        research += (
+            "\nExact figures from a full-text index over the whole archive "
+            "(complete counts of comments containing the words, not samples; "
+            "quote them as they are, and say they count comments that contain "
+            f"the words):\n{facts}\n"
+        )
     return f"""You are a helpful assistant answering questions about Hacker News discussions.
 
 User Question: {query}

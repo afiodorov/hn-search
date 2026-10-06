@@ -98,8 +98,29 @@ def get_docs(hn_ids: list[str]) -> dict[str, dict]:
     return {d["id"]: d for d in resp.json()}
 
 
+def keyword(
+    term: str,
+    time_after: str | None = None,
+    time_before: str | None = None,
+    k: int = 5,
+) -> dict:
+    """Exact counts from the service's full-text index: `{term, count, rows,
+    first: [docs], months: [{month, count, rows}]}`. The service answers 503
+    when it has no index."""
+    if not RUST_URL:
+        raise RuntimeError("HN_SEARCH_URL is not set for the rust search backend")
+    body: dict = {"term": term, "k": k}
+    if time_after:
+        body["time_after"] = time_after
+    if time_before:
+        body["time_before"] = time_before
+    resp = _get_client().post("/keyword", json=body)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def stats() -> dict:
-    """Corpus freshness: `{count, max_id, latest_timestamp}` from the service."""
+    """Corpus range: `{count, max_id, earliest_timestamp, latest_timestamp}`."""
     if not RUST_URL:
         raise RuntimeError("HN_SEARCH_URL is not set for the rust search backend")
     resp = _get_client().get("/stats")

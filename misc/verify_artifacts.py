@@ -35,7 +35,9 @@ def fail(msg: str):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--artifacts", type=Path, default=Path("rust-search/artifacts"))
-    ap.add_argument("--samples", type=int, default=2000, help="random rows for alignment check")
+    ap.add_argument(
+        "--samples", type=int, default=2000, help="random rows for alignment check"
+    )
     args = ap.parse_args()
 
     a = args.artifacts
@@ -61,8 +63,10 @@ def main():
     n = sql_rows
     ahead = max(codes_rows, f16_rows) - n
     if ahead:
-        print(f"… build in progress: .bin files {ahead:,} rows ahead of SQLite "
-              f"(in-flight batch; the next resume trims to {n:,})")
+        print(
+            f"… build in progress: .bin files {ahead:,} rows ahead of SQLite "
+            f"(in-flight batch; the next resume trims to {n:,})"
+        )
     else:
         print("✓ all three files agree exactly (at rest)")
 
@@ -84,13 +88,19 @@ def main():
     vecs = np.asarray(f16[idx], dtype=np.float32)
     recomputed = np.packbits(vecs > 0, axis=1, bitorder="big")
     if not np.array_equal(recomputed, np.asarray(codes[idx])):
-        fail("codes.bin does not match re-quantized rerank_f16.bin — files are misaligned")
+        fail(
+            "codes.bin does not match re-quantized rerank_f16.bin — files are misaligned"
+        )
     print(f"✓ code↔vector alignment verified on {len(idx):,} random rows")
 
     meta_path = a / "meta.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text())
-        status = "matches" if meta["count"] == n else f"STALE (meta={meta['count']:,}, build still running)"
+        status = (
+            "matches"
+            if meta["count"] == n
+            else f"STALE (meta={meta['count']:,}, build still running)"
+        )
         print(f"meta.json count: {meta['count']:,} — {status}")
 
     conn.close()

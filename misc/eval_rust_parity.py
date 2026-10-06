@@ -56,7 +56,9 @@ def load_corpus(artifacts: Path):
     n = meta["count"]
     mm = np.memmap(artifacts / "rerank_f16.bin", dtype="<f2", mode="r", shape=(n, DIM))
     conn = sqlite3.connect(artifacts / "docs.sqlite")
-    ids = [r[0] for r in conn.execute("SELECT hn_id FROM doc ORDER BY rowid").fetchall()]
+    ids = [
+        r[0] for r in conn.execute("SELECT hn_id FROM doc ORDER BY rowid").fetchall()
+    ]
     conn.close()
     assert n == len(ids), f"{n} vecs vs {len(ids)} ids"
     return mm, ids
@@ -81,7 +83,12 @@ def rust_search(url, token, q, k):
     import httpx
 
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    r = httpx.post(f"{url}/search", json={"embedding": q.tolist(), "k": k}, headers=headers, timeout=30)
+    r = httpx.post(
+        f"{url}/search",
+        json={"embedding": q.tolist(), "k": k},
+        headers=headers,
+        timeout=30,
+    )
     r.raise_for_status()
     return r.json()
 
@@ -94,8 +101,12 @@ def main():
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--eps", type=float, default=2e-3)
     ap.add_argument("--min-recall", type=float, default=0.99)
-    ap.add_argument("--n-queries", type=int, default=len(DEFAULT_QUERIES),
-                    help="How many of the default queries to run (each is a full corpus scan)")
+    ap.add_argument(
+        "--n-queries",
+        type=int,
+        default=len(DEFAULT_QUERIES),
+        help="How many of the default queries to run (each is a full corpus scan)",
+    )
     ap.add_argument("--chunk", type=int, default=500_000)
     args = ap.parse_args()
 
@@ -112,8 +123,10 @@ def main():
     probe = probe / (np.linalg.norm(probe) or 1e-12)
     hits = rust_search(args.url, args.token, probe, args.k)
     ok_self = hits and hits[0]["id"] == ids[0] and hits[0]["distance"] < 1e-3
-    print(f"self-retrieval: top1={hits[0]['id']} dist={hits[0]['distance']:.2e} "
-          f"expected={ids[0]} -> {'OK' if ok_self else 'FAIL'}")
+    print(
+        f"self-retrieval: top1={hits[0]['id']} dist={hits[0]['distance']:.2e} "
+        f"expected={ids[0]} -> {'OK' if ok_self else 'FAIL'}"
+    )
 
     queries = DEFAULT_QUERIES[: args.n_queries]
     strict, tie, dmax = [], [], 0.0
@@ -127,11 +140,16 @@ def main():
         rust_ids = [h["id"] for h in hits]
 
         strict.append(len(set(gt_ids) & set(rust_ids)) / args.k)
-        good = sum(1 for rid in rust_ids if dist[id_to_idx[rid]] <= threshold + args.eps)
+        good = sum(
+            1 for rid in rust_ids if dist[id_to_idx[rid]] <= threshold + args.eps
+        )
         tie.append(good / args.k)
         for h in hits:
             dmax = max(dmax, abs(dist[id_to_idx[h["id"]]] - h["distance"]))
-        print(f"  · {query[:40]:40s} strict={strict[-1]:.1f} tie={tie[-1]:.1f}", file=sys.stderr)
+        print(
+            f"  · {query[:40]:40s} strict={strict[-1]:.1f} tie={tie[-1]:.1f}",
+            file=sys.stderr,
+        )
 
     msr, mtr = float(np.mean(strict)), float(np.mean(tie))
     print(f"\nqueries: {len(queries)}")

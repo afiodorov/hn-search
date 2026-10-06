@@ -71,6 +71,27 @@ def stub_backend(monkeypatch):
     monkeypatch.setattr(search_backend, "similar", fake_similar)
     monkeypatch.setattr(search_backend, "get_docs", fake_docs)
     monkeypatch.setattr(search_backend, "stats", lambda: {"count": 12, "max_id": 9})
+
+    def fake_keyword(term, time_after=None, time_before=None, k=5):
+        calls.setdefault("keyword", []).append((term, time_after, time_before, k))
+        return {
+            "term": term,
+            "count": 3,
+            "rows": 100,
+            "first": [
+                {
+                    "id": "43000001",
+                    "clean_text": "Rust is fine.",
+                    "author": "alice",
+                    "timestamp": "2025-01-02T03:04:05",
+                    "type": "comment",
+                    "parent_id": None,
+                }
+            ],
+            "months": [{"month": "2025-01", "count": 3, "rows": 100}],
+        }
+
+    monkeypatch.setattr("hn_search.rag.tools.keyword", fake_keyword)
     # The tools module imported these names directly, so patch them there too.
     monkeypatch.setattr("hn_search.rag.tools.search", fake_search)
     monkeypatch.setattr("hn_search.rag.tools.similar", fake_similar)
@@ -197,7 +218,7 @@ def test_mcp_lists_the_tools(client):
     )
     assert r.status_code == 200, r.text
     names = {t["name"] for t in r.json()["result"]["tools"]}
-    assert names == {"search", "similar", "comments", "stats", "ask"}
+    assert names == {"search", "similar", "comments", "keyword", "stats", "ask"}
 
 
 def test_mcp_search_returns_structured_hits(client):
@@ -206,6 +227,26 @@ def test_mcp_search_returns_structured_hits(client):
     hits = result["structuredContent"]["result"]
     assert hits[0]["id"] == "43000001"
     assert hits[0]["url"].endswith("43000001")
+
+
+def test_keyword_route(client, stub_backend):
+    r = client.get(
+        "/api/keyword", params={"term": " rust ", "time_after": "2025-01-01"}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["count"], body["rows"]) == (3, 100)
+    assert body["first"][0]["url"] == "https://news.ycombinator.com/item?id=43000001"
+    assert body["months"] == [{"month": "2025-01", "count": 3, "rows": 100}]
+    assert stub_backend["keyword"] == [("rust", "2025-01-01", None, 5)]
+
+    assert client.get("/api/keyword", params={"term": " "}).status_code == 400
+
+
+def test_mcp_keyword(client):
+    result = _call(client, "keyword", term="rust", k=2)
+    assert result["isError"] is False, result
+    assert result["structuredContent"]["count"] == 3
 
 
 def test_mcp_stats(client):

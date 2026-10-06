@@ -77,7 +77,9 @@ class Rig:
         monkeypatch.setattr(
             agent,
             "make_llm",
-            lambda temperature=0.7, thinking=True: self.planner if temperature == 0 else self.writer,
+            lambda temperature=0.7, thinking=True: self.planner
+            if temperature == 0
+            else self.writer,
         )
         monkeypatch.setattr(agent, "archive_start", lambda: "2023-01-01")
         monkeypatch.setattr(agent, "_fetch_parent_texts", lambda sources: {})
@@ -87,8 +89,11 @@ class Rig:
         def fake_tool(name):
             def invoke(args):
                 self.tool_log.append((name, args))
-                key = args.get("query") or args.get("hn_id") or ",".join(
-                    args.get("hn_ids", [])
+                key = (
+                    args.get("query")
+                    or args.get("hn_id")
+                    or args.get("term")
+                    or ",".join(args.get("hn_ids", []))
                 )
                 if key in failing:
                     raise RuntimeError(f"backend said no to {key}")
@@ -140,7 +145,11 @@ def test_the_seed_search_is_the_planners_first_observation(monkeypatch):
 
 
 def test_a_dated_search_round_feeds_back_and_the_pick_spans_both(monkeypatch):
-    early = {"query": "ChatGPT", "time_after": "2023-01-01", "time_before": "2023-01-07"}
+    early = {
+        "query": "ChatGPT",
+        "time_after": "2023-01-01",
+        "time_before": "2023-01-07",
+    }
     rig = Rig(
         monkeypatch,
         [
@@ -152,13 +161,18 @@ def test_a_dated_search_round_feeds_back_and_the_pick_spans_both(monkeypatch):
         ],
         results={
             "first mention of chatgpt": [row("1")],
-            "ChatGPT": [row("10", "2023-01-01T00:14:00"), row("11", "2023-01-01T02:00:00")],
+            "ChatGPT": [
+                row("10", "2023-01-01T00:14:00"),
+                row("11", "2023-01-01T02:00:00"),
+            ],
         },
     ).run("first mention of chatgpt")
 
     assert rig.tool_log[1] == ("semantic_search", early)
     second_turn = rig.planner.turns[1]
-    assert isinstance(second_turn[-1], ToolMessage) and "[10]" in second_turn[-1].content
+    assert (
+        isinstance(second_turn[-1], ToolMessage) and "[10]" in second_turn[-1].content
+    )
     # 999 was never found, so it can't be cited.
     assert rig.source_ids == ["10", "11"]
     [prompt] = rig.writer.prompts
@@ -232,7 +246,45 @@ def test_several_calls_in_a_round_all_run(monkeypatch):
     assert len([m for m in rig.planner.turns[1] if isinstance(m, ToolMessage)]) == 4
     assert rig.source_ids == ["5", "3", "4"]
     [label] = {label for step, _, label in rig.steps if step == "tools"}
-    assert label == "Searching “rust”; “go”; reading 1 comments"
+    assert label == "Searching “rust”; searching “go”; reading 1 comments"
+
+
+def test_counts_reach_the_writer_verbatim_and_earliest_matches_are_citable(
+    monkeypatch,
+):
+    counted = {
+        "term": "chatgpt",
+        "time_after": None,
+        "time_before": None,
+        "count": 100512,
+        "rows": 13257107,
+        "first": [row("34202113", "2023-01-01 08:57:03+00:00", "made by chatgpt")],
+        "months": [
+            {"month": "2023-01", "count": 4812, "rows": 310000},
+            {"month": "2023-02", "count": 5100, "rows": 290000},
+        ],
+    }
+    rig = Rig(
+        monkeypatch,
+        [
+            calls(("keyword_stats", {"term": "chatgpt"})),
+            AIMessage(content='{"sources": ["34202113"], "notes": "Counted."}'),
+        ],
+        results={"chatgpt": counted},
+    ).run("how many times was chatgpt mentioned")
+
+    figure = (
+        'Exact count for "chatgpt": 100,512 of 13,257,107 comments (0.76%) '
+        "contain it.\nBy month (comments containing it / all comments): "
+        "2023-01: 4,812/310,000, 2023-02: 5,100/290,000."
+    )
+    shown = rig.planner.turns[1][-1].content
+    assert shown.startswith(figure) and "[34202113]" in shown
+    assert rig.source_ids == ["34202113"]
+    [prompt] = rig.writer.prompts
+    assert figure in prompt and "not samples" in prompt
+    labels = {label for step, _, label in rig.steps if step == "tools"}
+    assert labels == {"Counting “chatgpt”"}
 
 
 def test_sources_are_capped(monkeypatch):

@@ -58,11 +58,18 @@ from hn_search.search_backend import get_docs
 from . import guard
 from .nodes import build_context, build_prompt, make_llm
 from .state import SearchResult
-from .tools import archive_start, get_comments, semantic_search, similar_comments
+from .tools import (
+    KeywordStats,
+    archive_start,
+    get_comments,
+    keyword_stats,
+    semantic_search,
+    similar_comments,
+)
 
 logger = get_logger(__name__)
 
-_TOOLS = [semantic_search, similar_comments, get_comments]
+_TOOLS = [semantic_search, similar_comments, get_comments, keyword_stats]
 _TOOLS_BY_NAME = {t.name: t for t in _TOOLS}
 _DEFAULT_K = 10
 # Rounds of tool calls before the planner must finish. One round is one planner
@@ -97,6 +104,10 @@ that window, however narrow.
 - similar_comments(hn_id): comments like a given comment.
 - get_comments(hn_ids): full text of comments by id, with each one's parent_id, \
 for reading a comment in full or walking up a thread.
+- keyword_stats(term, time_after, time_before, k): exact counts from a \
+full-text index over the whole archive: how many comments contain the word or \
+phrase, per month (with each month's total), and the k earliest that contain \
+it. Whole words, case-insensitive; it matches words, not meanings.
 
 How to search well:
 - If the results you already have answer the question, finish straight away.
@@ -106,12 +117,15 @@ Search each side of a comparison, and each part of a compound question, on its o
 time_after/time_before, computed from today's date.
 - For a news.ycombinator.com/item?id=... link or a bare comment id, call \
 similar_comments with that id; the plain search on a pasted link is usually noise.
-- For "the first mention of X", "when did people start talking about X" or "the \
-earliest comment about X": search X in a narrow window (days or weeks) starting \
-at the archive start, or at when X is known to have appeared if that is later. \
-Check that the hits actually mention X, and move the window later until they do. \
-If X is older than the archive, its earliest hits sit at the archive start; say \
-so in your notes.
+- For "how many", "how often", "how popular over time", "the first mention of X" \
+or "when did people start talking about X", call keyword_stats with the term as \
+commenters would write it (try the common spellings or names, e.g. "chatgpt" and \
+"chat gpt", in the same round). Its figures reach the writer exactly as counted, \
+so don't restate them in your notes. Its earliest matches are oldest first; check \
+they really are about X (a word can have other meanings) and pick from them. If \
+the earliest match sits at the archive start, X is older than the archive; say \
+so in your notes. Add a semantic_search when the question also asks what people \
+said.
 - You have at most {max_rounds} rounds of tool calls. Make independent searches \
 in the same round.
 
@@ -140,6 +154,9 @@ class AgentState(TypedDict):
     tool_calls: list[dict]
     # Every result any tool returned, by id, in the order first found.
     pool: dict[str, SearchResult]
+    # Exact figures from keyword_stats, passed to the writer verbatim: numbers
+    # a planner paraphrases are numbers it can get wrong.
+    facts: list[str]
     notes: str
     sources: list[SearchResult]
     parent_texts: dict[str, str]
@@ -154,6 +171,7 @@ def initial_state(query: str) -> AgentState:
         rounds=0,
         tool_calls=[],
         pool={},
+        facts=[],
         notes="",
         sources=[],
         parent_texts={},
@@ -200,19 +218,52 @@ def _add_to_pool(
     return merged
 
 
-def _run_tool(name: str, args: dict) -> tuple[list[SearchResult], str]:
-    """Run one tool call; return its results and what the planner is shown. A
+def format_keyword_stats(stats: KeywordStats) -> str:
+    """The figures as plain text, for the planner and for the writer."""
+    window = (
+        f" between {stats['time_after'] or 'the archive start'} and "
+        f"{stats['time_before'] or 'today'}"
+        if stats["time_after"] or stats["time_before"]
+        else ""
+    )
+    share = 100 * stats["count"] / stats["rows"] if stats["rows"] else 0.0
+    lines = [
+        f'Exact count for "{stats["term"]}"{window}: {stats["count"]:,} of '
+        f"{stats['rows']:,} comments ({share:.2f}%) contain it."
+    ]
+    if stats["count"] and len(stats["months"]) > 1:
+        months = ", ".join(
+            f"{m['month']}: {m['count']:,}/{m['rows']:,}" for m in stats["months"]
+        )
+        lines.append(f"By month (comments containing it / all comments): {months}.")
+    return "\n".join(lines)
+
+
+def _run_tool(name: str, args: dict) -> tuple[list[SearchResult], str, str | None]:
+    """Run one tool call; return its citable results, what the planner is
+    shown, and an exact figure for the writer if the tool produced one. A
     failing call (bad id, service hiccup) is reported to the planner as text,
     so it can try something else, rather than ending the run."""
     tool = _TOOLS_BY_NAME.get(name)
     if tool is None:
-        return [], f"Unknown tool {name!r}."
+        return [], f"Unknown tool {name!r}.", None
     try:
-        results = cast(list[SearchResult], tool.invoke(args))
+        out = tool.invoke(args)
     except Exception as e:
         logger.warning(f"tool {name} failed: {e}")
-        return [], f"The call failed: {e}"
-    return results, _format_results(results)
+        return [], f"The call failed: {e}", None
+    if name == keyword_stats.name:
+        stats = cast(KeywordStats, out)
+        fact = format_keyword_stats(stats)
+        earliest = _format_results(stats["first"]) if stats["first"] else ""
+        shown = (
+            f"{fact}\n\nEarliest matches, oldest first: {earliest}"
+            if earliest
+            else fact
+        )
+        return stats["first"], shown, fact
+    results = cast(list[SearchResult], out)
+    return results, _format_results(results), None
 
 
 def _seed_node(state: AgentState) -> dict:
@@ -226,7 +277,7 @@ def _seed_node(state: AgentState) -> dict:
         "id": _SEED_CALL_ID,
         "type": "tool_call",
     }
-    results, shown = _run_tool(call["name"], call["args"])
+    results, shown, _ = _run_tool(call["name"], call["args"])
     return {
         "messages": [
             SystemMessage(
@@ -273,10 +324,13 @@ def _tools_node(state: AgentState) -> dict:
     to the pool and hand them back to it."""
     last = cast(AIMessage, state["messages"][-1])
     pool = state["pool"]
+    facts = list(state["facts"])
     replies: list[BaseMessage] = []
     for call in last.tool_calls:
-        results, shown = _run_tool(call["name"], call.get("args", {}))
+        results, shown, fact = _run_tool(call["name"], call.get("args", {}))
         pool = _add_to_pool(pool, results)
+        if fact and fact not in facts:
+            facts.append(fact)
         replies.append(
             ToolMessage(content=shown, tool_call_id=call["id"], name=call["name"])
         )
@@ -285,6 +339,7 @@ def _tools_node(state: AgentState) -> dict:
         "rounds": state["rounds"] + 1,
         "tool_calls": [*state["tool_calls"], *last.tool_calls],
         "pool": pool,
+        "facts": facts,
     }
 
 
@@ -374,17 +429,20 @@ def _gather_sources(state: AgentState) -> dict:
 def _synthesize_answer(state: AgentState) -> dict:
     query = state["query"]
     notes = state["notes"]
+    facts = "\n".join(state["facts"])
     context = build_context(state["sources"], state["parent_texts"])
-    # The notes shape the answer as much as the sources do, so they are part of
-    # what the cached answer is keyed on.
-    cache_context = f"{notes}\n\n{context}" if notes else context
+    # The notes and figures shape the answer as much as the sources do, so they
+    # are part of what the cached answer is keyed on.
+    cache_context = "\n\n".join(part for part in (facts, notes, context) if part)
 
     cached_answer = get_cached_answer(query, cache_context)
     if cached_answer:
         return {"answer": cached_answer}
 
     llm = make_llm()
-    prompt = build_prompt(query, context, notes=notes, archive_start=archive_start())
+    prompt = build_prompt(
+        query, context, notes=notes, facts=facts, archive_start=archive_start()
+    )
     # DeepSeek's chat completions are text-only, so .content is always a plain
     # str here despite BaseMessage's broader str | list[...] type.
     answer = cast(str, llm.invoke(prompt).content)

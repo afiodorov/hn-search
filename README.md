@@ -20,6 +20,8 @@ question with cited sources.
   optionally date-bounded — "find comments like this HN link", and reading comments
   in full), sees each round's results, picks the sources, then DeepSeek drafts the
   cited answer
+- 🔢 **Exact keyword counts**: a full-text (FTS5) index over every comment answers
+  "how many", "per month" and "first mention" questions exactly
 - ⚡ **ONNX query encoder**: serve without torch (~300 MB instead of ~1.5 GB RAM)
 - 🔄 **Online updates**: daily incremental `/append`, no index rebuild
 - 🔐 **Two-token auth**: read token on the public web app, admin (write) token only

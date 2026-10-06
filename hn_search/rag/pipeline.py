@@ -44,17 +44,20 @@ def _progress(
     }
 
 
+def _window(args: dict) -> str:
+    after, before = args.get("time_after"), args.get("time_before")
+    return f" · {after or '…'} → {before or 'now'}" if after or before else ""
+
+
 def _describe_call(call: dict) -> str:
     args = call.get("args", {})
     name = call.get("name")
     if name == "semantic_search":
-        text = f"“{args.get('query', '')}”"
-        after, before = args.get("time_after"), args.get("time_before")
-        if after or before:
-            text += f" · {after or '…'} → {before or 'now'}"
-        return text
+        return f"searching “{args.get('query', '')}”{_window(args)}"
     if name == "similar_comments":
-        return f"comments like {args.get('hn_id')}"
+        return f"finding comments like {args.get('hn_id')}"
+    if name == "keyword_stats":
+        return f"counting “{args.get('term', '')}”{_window(args)}"
     if name == "get_comments":
         return f"reading {len(args.get('hn_ids') or [])} comments"
     return str(name)
@@ -63,7 +66,8 @@ def _describe_call(call: dict) -> str:
 def _describe_round(tool_calls: list[dict]) -> str:
     """One round of the planner's tool calls, as a progress label: what it is
     looking for is the interesting part of a run, so the log says it."""
-    label = "Searching " + "; ".join(_describe_call(c) for c in tool_calls)
+    label = "; ".join(_describe_call(c) for c in tool_calls)
+    label = label[:1].upper() + label[1:]
     if len(label) > _LABEL_MAX_CHARS:
         label = label[: _LABEL_MAX_CHARS - 1] + "…"
     return label

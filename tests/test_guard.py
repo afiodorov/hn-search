@@ -67,7 +67,7 @@ class Rig:
 
         def run_tool(name, args):
             self.searched.append(args["query"])
-            return [ROW], "1 results"
+            return [ROW], "1 results", None
 
         monkeypatch.setattr(agent, "make_llm", make_llm)
         monkeypatch.setattr(agent, "_run_tool", run_tool)

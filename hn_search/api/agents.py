@@ -34,7 +34,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from hn_search import search_backend
 from hn_search.logging_config import get_logger
 from hn_search.rag.pipeline import search_stream
-from hn_search.rag.tools import semantic_search, similar_comments
+from hn_search.rag.tools import keyword_stats, semantic_search, similar_comments
 
 logger = get_logger(__name__)
 
@@ -124,6 +124,26 @@ def comments(hn_ids: list[str]) -> list[dict]:
         for i in ids
         if (d := docs.get(i))
     ]
+
+
+def keyword(
+    term: str,
+    time_after: str | None = None,
+    time_before: str | None = None,
+    k: int = 5,
+) -> dict:
+    """Exact counts from the full-text index, through the planner's tool."""
+    if not term.strip():
+        raise ValueError("term must not be empty")
+    out = keyword_stats.invoke(
+        {
+            "term": term.strip(),
+            "time_after": time_after or None,
+            "time_before": time_before or None,
+            "k": _clamp_k(k),
+        }
+    )
+    return {**out, "first": _with_urls(out["first"])}
 
 
 def stats() -> dict:
@@ -236,6 +256,31 @@ async def comments_tool(hn_ids: list[str]) -> list[dict[str, Any]]:
     return await _tool(comments, hn_ids)
 
 
+@server.tool(name="keyword")
+async def keyword_tool(
+    term: str,
+    time_after: str | None = None,
+    time_before: str | None = None,
+    k: int = 5,
+) -> dict[str, Any]:
+    """Exact counts of comments containing a word or phrase, from a full-text
+    index over the whole corpus: the total, a per-month breakdown (with each
+    month's total comment volume), and the k earliest matching comments.
+
+    Matching is on whole words, case-insensitive, punctuation ignored; a
+    multi-word term must appear as that phrase. Words, not meanings: "llm" does
+    not match "large language model". Use it for "how many", trends over time,
+    and first mentions; use `search` for what people said.
+
+    Args:
+        term: A word or phrase, as commenters would write it.
+        time_after: Only comments on or after this date (YYYY-MM-DD).
+        time_before: Only comments on or before this date (YYYY-MM-DD).
+        k: How many of the earliest matches to return, 1-50.
+    """
+    return await _tool(keyword, term, time_after, time_before, k)
+
+
 @server.tool(name="stats")
 async def stats_tool() -> dict[str, Any]:
     """Corpus freshness: how many items are indexed, the highest item id, and the
@@ -305,6 +350,17 @@ async def find_route(
     return await _route(find, q, k, time_after, time_before)
 
 
+@router.get("/api/keyword")
+async def keyword_route(
+    term: str = "",
+    time_after: str | None = None,
+    time_before: str | None = None,
+    k: int = 5,
+) -> dict:
+    """Exact keyword counts as JSON. The twin of the MCP `keyword` tool."""
+    return await _route(keyword, term, time_after, time_before, k)
+
+
 @router.get("/api/similar")
 async def similar_route(id: str = "", k: int = 10) -> list[dict]:
     """Items similar to one numeric id. JSON twin of the MCP `similar` tool."""
@@ -332,7 +388,8 @@ Free, read-only, no auth. Query it directly rather than scraping the chat UI.
 
 Streamable HTTP endpoint: {base}{MCP_PATH}
 Tools: search(query, k, time_after, time_before), similar(hn_id, k), \
-comments(hn_ids), stats(), ask(question).
+comments(hn_ids), keyword(term, time_after, time_before, k), stats(), \
+ask(question).
 
 - Claude Code: `claude mcp add --transport http hn-search {base}{MCP_PATH}`
 - Claude API: mcp_servers=[{{"type": "url", "url": "{base}{MCP_PATH}", "name": "hn-search"}}]
@@ -343,6 +400,7 @@ comments(hn_ids), stats(), ask(question).
 - {base}/api/find?q=why+do+people+leave+google&k=10&time_after=2025-01-01 — semantic search (JSON)
 - {base}/api/similar?id=43000000&k=10 — items like one id (JSON)
 - {base}/api/comments?ids=43000000,43000001 — full text by id (JSON)
+- {base}/api/keyword?term=chatgpt&time_after=2024-01-01 — exact counts, per month, earliest mentions (JSON)
 - {base}/api/stats — corpus size and freshness (JSON)
 - {base}/api/search?q=... — the hosted RAG agent, as server-sent events
 - {base}/openapi.json — the OpenAPI description of all of the above
