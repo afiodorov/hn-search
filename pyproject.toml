@@ -49,6 +49,10 @@ target-version = "py313"
 [tool.pyright]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
+# airflow/ holds DAGs that import Airflow, which only the VPS has; pyright would
+# also take the folder itself for the `airflow` package. Setting `exclude`
+# replaces pyright's defaults, so they're repeated here.
+exclude = ["airflow", "**/node_modules", "**/__pycache__", "**/.*"]
 
 [build-system]
 requires = ["hatchling"]

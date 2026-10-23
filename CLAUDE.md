@@ -21,7 +21,8 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
   `src/main.rs` is the HTTP layer; `index.rs`/`quantize.rs`/`db.rs` do the work;
   `fts.rs` is the full-text index behind `/keyword`.
 - `misc/` — data pipeline: BigQuery fetch, GPU/CPU embedding, artifact build, the
-  daily incremental updater.
+  hourly incremental updater.
+- `airflow/dags/` — the DAG that runs that updater on the VPS (`make airflow-dags`).
 - `frontend/` — React UI; `npm run build` emits assets the API serves.
 - `hn_search/api/agents.py` — the surface for other agents: `/mcp` (Streamable
   HTTP MCP, tools `search`, `similar`, `comments`, `stats`, `ask`), the same as
@@ -71,8 +72,11 @@ The daily updater batches at 1000 rows (~10 MB), comfortably under 64 MB.
 
 ## Production deployment (Railway, the web app)
 
-**Pushing `main` deploys production.** Railway builds the `Dockerfile` from the
-GitHub repo (`hn-search-web` service, `Redis` alongside) and is live at
+**Pushing `main` deploys production** — when the push touches what the image is
+built from. `railway.json`'s watch paths skip pushes that only change `misc/`,
+`airflow/`, `rust-search/`, tests, docs or tool config in `pyproject.toml` (the
+image installs from `uv.lock`, which any dependency change also touches). Railway
+builds the `Dockerfile` from the GitHub repo (`hn-search-web` service, `Redis` alongside) and is live at
 https://hn.fiodorov.es a few minutes later; `railway deployment list` shows it
 (`railway link -p hn-search -s hn-search-web` once per machine; the CLI's
 interactive prompts hang under an agent, so pass the flags). Railway variables
@@ -149,20 +153,29 @@ syntax in user input is searched literally.
 
 ## Updating the corpus
 
-**Daily incremental** — automated on the VPS via Airflow (also runnable by hand):
+**Hourly incremental** — automated on the VPS via Airflow (also runnable by hand):
 ```sh
 uv run --extra dev python misc/fetch_and_embed_new_comments.py
 ```
-Reads the service's `/max_id` → pulls newer comments from BigQuery → embeds on CPU
-(ONNX) → POSTs to `/append`. Flags: `--skip-fetch`, `--skip-embed`, `--skip-append`,
-`--reset`. It checkpoints to `data/raw/fetch_state.json` and reuses existing
+Reads the service's `/max_id` → pulls newer comments from HN's official API
+(`hacker-news.firebaseio.com/v0`, one request per id, ~160 ids/s from the box), up to
+the first item still inside HN's 2-hour edit window → embeds on CPU (ONNX) → POSTs to
+`/append`. `--source bigquery` uses the public dataset instead; it went 6 days without
+refreshing in Oct 2026, which is why the API is the default. Rows must be appended as
+a contiguous id range (the service's date windows binary-search rows assuming id
+order), so a fetch that can't get an id stops before it and exits non-zero rather
+than skipping it. Flags: `--skip-fetch`, `--skip-embed`, `--skip-append`, `--reset`. It checkpoints to `data/raw/fetch_state.json` and reuses existing
 raw/embedded parquet files, so a re-run after a failure resumes cheaply.
 
 **Automation (Airflow on the VPS).** A systemd `airflow.service` (`airflow standalone`,
 Airflow 3.x in `/root/airflow-venv`, `AIRFLOW_HOME=/root/airflow`) runs the DAG
-`hn_incremental_update` daily at `0 6 * * *` UTC — one `BashOperator`:
+`hn_incremental_update` hourly at `10 * * * *` UTC — one `BashOperator`:
 `cd /root/hn-search && /root/.local/bin/uv run --extra dev python
-misc/fetch_and_embed_new_comments.py --reset`. The box has its own non-git rsync copy
+misc/fetch_and_embed_new_comments.py --reset`. Runs aren't hour slices: each starts
+from `/max_id`, so a failed or skipped hour just enlarges the next run, and
+`max_active_runs=1` keeps two runs from appending out of order. The DAG source is
+`airflow/dags/hn_incremental_update.py`; `make airflow-dags` copies it to
+`/root/airflow/dags/` on the box. The box has its own non-git rsync copy
 of the repo at `/root/hn-search` (env in `.env` there: `HN_SEARCH_URL=http://127.0.0.1:8001`,
 admin token, `GOOGLE_CLOUD_PROJECT`, and ADC copied to `/root/.config/gcloud/`). **Code
 changes to the updater don't propagate automatically — re-rsync `./` to

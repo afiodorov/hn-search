@@ -1,14 +1,24 @@
 #!/usr/bin/env python
-"""Fetch new HN comments from BigQuery, embed with the ONNX encoder, and append them
-to the Rust search service (/append).
+"""Fetch new HN comments, embed with the ONNX encoder, and append them to the Rust
+search service (/append).
 
 Asks the service for its high-water mark (/max_id), pulls only newer comments,
 embeds them on CPU (no torch/GPU), and POSTs them — new rows are searchable
 immediately via the service's tail. Idempotent and resumable.
 
+Comments come from HN's official API by default, up to the newest one that is past
+HN's 2-hour edit window. `--source bigquery` uses the public BigQuery dataset
+instead, which is cheaper in bulk but has gone days without refreshing.
+
+The high-water mark is the only state, and it must only ever move forward over a
+contiguous id range: the service stores rows in id order and finds date windows by
+binary search, so an id appended out of order breaks them. A missed or failed run
+is therefore harmless (the next one starts from the same max_id), but a run must
+never skip an id it failed to fetch — it stops there instead.
+
 Run from wherever the ADMIN token lives (your laptop). Requires:
     HN_SEARCH_URL, HN_SEARCH_ADMIN_TOKEN     — the service + write token
-    GOOGLE_CLOUD_PROJECT (+ creds)           — BigQuery billing
+    GOOGLE_CLOUD_PROJECT (+ creds)           — BigQuery billing, --source bigquery only
 
 Usage:
     uv run --extra dev python misc/fetch_and_embed_new_comments.py
@@ -18,7 +28,9 @@ Usage:
 import argparse
 import json
 import os
-from datetime import datetime
+import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, cast
 
@@ -147,6 +159,129 @@ def fetch_from_bigquery(
     temp_filepath.rename(filepath)
     print(f"💾 Saved to {filepath}")
     return filepath
+
+
+HN_API = "https://hacker-news.firebaseio.com/v0"
+# HN lets authors edit for 2 hours; fetching only items at least this old means
+# we index what they settled on, not a draft.
+EDIT_WINDOW_S = 2 * 3600
+
+
+class FetchStopped(Exception):
+    """An item couldn't be fetched, so the run stopped just before it.
+
+    Appends must stay in id order (the service binary-searches rows by time), so
+    skipping past a failed id would strand it below the next run's max_id
+    forever. Everything before it is still appended; the next run (or Airflow's
+    retry) resumes from there.
+    """
+
+
+async def _fetch_items(ids, concurrency: int, attempts: int = 4) -> dict:
+    """{id: item JSON or None}; raises FetchStopped at the first id that kept
+    failing, carrying what was fetched before it."""
+    import asyncio
+
+    import httpx
+
+    sem = asyncio.Semaphore(concurrency)
+    out: dict = {}
+
+    async with httpx.AsyncClient(timeout=20) as client:
+
+        async def one(i):
+            async with sem:
+                for attempt in range(attempts):
+                    try:
+                        r = await client.get(f"{HN_API}/item/{i}.json")
+                        r.raise_for_status()
+                        out[i] = r.json()
+                        return
+                    except (httpx.HTTPError, ValueError):
+                        await asyncio.sleep(2**attempt)
+
+        await asyncio.gather(*(one(i) for i in ids))
+
+    for i in ids:
+        if i not in out:
+            raise FetchStopped(i, {k: v for k, v in out.items() if k < i})
+    return out
+
+
+def fetch_from_hn_api(
+    min_id, output_dir="data/raw", concurrency=20, batch=2000
+) -> Tuple[Optional[Path], bool]:
+    """Fetch comments with id > min_id from the official HN API, stopping at the
+    first item younger than the edit window.
+
+    Returns (parquet path or None, stopped_early). The rows are a contiguous id
+    range, so appending them in order keeps the service's rows time-ordered.
+    """
+    import asyncio
+
+    import httpx
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    filepath = output_path / f"new_comments_from_{min_id}.parquet"
+    if filepath.exists():
+        print(f"✅ Found existing raw file: {filepath}")
+        return filepath, False
+
+    max_item = httpx.get(f"{HN_API}/maxitem.json", timeout=30).json()
+    cutoff = time.time() - EDIT_WINDOW_S
+    print(
+        f"\n📥 Fetching items {min_id + 1}..{max_item} from the HN API "
+        f"(posted before {datetime.fromtimestamp(cutoff, timezone.utc):%F %T} UTC)"
+    )
+
+    rows, stopped, done = [], False, False
+    for start in range(min_id + 1, max_item + 1, batch):
+        ids = list(range(start, min(start + batch, max_item + 1)))
+        try:
+            items = asyncio.run(_fetch_items(ids, concurrency))
+        except FetchStopped as e:
+            failed_id, items = e.args
+            ids = [i for i in ids if i < failed_id]
+            print(f"⚠️  item {failed_id} kept failing; stopping just before it")
+            stopped = done = True
+        for i in ids:
+            item = items[i]
+            if item is None:  # never existed / not visible; nothing to index
+                continue
+            if item.get("time", 0) > cutoff:
+                done = True
+                break
+            if (
+                item.get("type") == "comment"
+                and not item.get("dead")
+                and not item.get("deleted")
+                and item.get("text")
+            ):
+                rows.append(
+                    {
+                        "id": i,
+                        "author": item.get("by"),
+                        "type": "comment",
+                        "text": item["text"],
+                        "timestamp": pd.Timestamp(item["time"], unit="s", tz="UTC"),
+                        "parent": item.get("parent"),
+                    }
+                )
+        print(f"  {ids[-1] if ids else start}: {len(rows):,} comments so far")
+        if done:
+            break
+
+    print(f"Fetched {len(rows):,} new comments")
+    if not rows:
+        print("No new comments to process")
+        return None, stopped
+    df = pd.DataFrame(rows)
+    temp_filepath = filepath.with_suffix(".parquet.tmp")
+    df.to_parquet(temp_filepath, index=False)
+    temp_filepath.rename(filepath)
+    print(f"💾 Saved to {filepath}")
+    return filepath, stopped
 
 
 def embed_and_append(parquet_file, chunk_size=1000) -> int:
@@ -312,6 +447,12 @@ def main():
     parser.add_argument(
         "--project", type=str, help="GCP project ID for BigQuery billing"
     )
+    parser.add_argument(
+        "--source",
+        choices=["api", "bigquery"],
+        default="api",
+        help="HN's live API (default), or the BigQuery dataset, which lags by days",
+    )
     args = parser.parse_args()
 
     print("=" * 80)
@@ -324,10 +465,16 @@ def main():
     max_id = get_max_id_rust()
 
     parquet_file = None
+    stopped = False
     if not args.skip_fetch:
-        parquet_file = fetch_from_bigquery(max_id, state=state, project=args.project)
+        if args.source == "api":
+            parquet_file, stopped = fetch_from_hn_api(max_id)
+        else:
+            parquet_file = fetch_from_bigquery(
+                max_id, state=state, project=args.project
+            )
         if not parquet_file:
-            return
+            sys.exit(1 if stopped else 0)
         state["raw_file"] = str(parquet_file)
         save_state(state)
     elif state.get("raw_file"):
@@ -345,6 +492,9 @@ def main():
         state["completed_at"] = datetime.now().isoformat()
         save_state(state)
         cleanup_artifacts()
+        if stopped:
+            # What was fetched is in; fail so Airflow retries the rest.
+            sys.exit("❌ Stopped early on an item that wouldn't fetch")
         print("\n✅ Done.")
         return
 

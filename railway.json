@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "watchPatterns": [
+      "Dockerfile",
+      "uv.lock",
+      ".python-version",
+      "hn_search/**",
+      "frontend/**"
+    ]
+  }
+}

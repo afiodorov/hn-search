@@ -1,5 +1,5 @@
 .PHONY: format lint typecheck test eval eval-view clean fetch embed artifacts rebuild \
-        staging staging-down staging-logs staging-prune
+        staging staging-down staging-logs staging-prune airflow-dags
 
 # Default target - run both formatting and linting
 format:
@@ -87,3 +87,9 @@ staging-logs:
 staging-prune:
 	docker image prune -f
 	docker builder prune -f
+
+# ---- Airflow on the VPS ----
+# The box's scheduler reads DAGs from /root/airflow/dags and picks up changes on
+# its own within a minute or so. No --delete: other projects' DAGs live there too.
+airflow-dags:
+	rsync -av airflow/dags/*.py hnsearch:/root/airflow/dags/
