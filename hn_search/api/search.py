@@ -7,6 +7,8 @@ mirrored progress then the full answer in one shot (tokens are SSE-only).
 """
 
 import json
+import queue
+import threading
 import time
 
 from sse_starlette import ServerSentEvent
@@ -80,9 +82,30 @@ def _replay(job_id: str, result: dict):
 
 
 def _process(query: str, job_id: str):
-    answer = ""
-    sources = []
+    """Run the job in a background thread and stream its events.
 
+    The pipeline must not live inside this generator: when the client goes
+    away (a reload, a click to another search, a closed tab), the generator
+    is simply never resumed, so a pipeline run from here stopped wherever it
+    was — holding the job claim, storing nothing — and everyone who asked the
+    same question after waited on a job nothing was running. The thread runs
+    to completion whether or not anyone is still reading this queue; a
+    returning visitor attaches to it through Redis like any other request.
+    """
+    events: queue.Queue[dict | None] = queue.Queue()
+    threading.Thread(
+        target=_run_job, args=(query, job_id, events.put), daemon=True
+    ).start()
+
+    while (event := events.get()) is not None:
+        yield _sse(event)
+    yield _done()
+
+
+def _run_job(query: str, job_id: str, emit) -> None:
+    """Run the pipeline, recording progress, result and errors in Redis, and
+    hand every event to `emit`. `emit(None)` marks the end."""
+    sources = []
     try:
         for event in search_stream(query):
             etype = event["type"]
@@ -91,63 +114,57 @@ def _process(query: str, job_id: str):
             elif etype == "sources":
                 sources = event["sources"]
             elif etype == "answer":
-                answer = event["text"]
                 refused = bool(event.get("refused"))
-                # Persist the moment the answer is known, before trying to
-                # forward it — if the client disconnected while we were
-                # working (tab backgrounded/discarded mid-request), yielding
-                # below throws GeneratorExit and we'd never reach the
-                # store_result call after the loop, silently discarding a
-                # fully-computed answer. Anything attach()ed or replaying this
-                # job would then hang forever waiting for a result that was
-                # actually done and just never got saved.
-                result = {"answer": answer, "sources": sources, "refused": refused}
+                result = {
+                    "answer": event["text"],
+                    "sources": sources,
+                    "refused": refused,
+                }
                 job_manager.store_result(job_id, result)
                 _track(query, result)
                 # A refusal is not a retrieval to regress against.
                 if not refused:
-                    job_manager.log_eval_record(query, sources, answer)
+                    job_manager.log_eval_record(query, sources, event["text"])
             elif etype == "error":
                 job_manager.store_error(job_id, event["message"])
-                yield _sse(event)
-                yield _done()
+                emit(event)
                 return
-            yield _sse(event)
-
-        yield _done()
+            emit(event)
     except Exception as e:
         logger.exception(f"Search failed for: {query}")
         job_manager.store_error(job_id, str(e))
-        yield _sse({"type": "error", "message": str(e)})
-        yield _done()
+        emit({"type": "error", "message": str(e)})
+    finally:
+        emit(None)
 
 
 def _attach(query: str, job_id: str):
     """Follow a job another request is processing: mirror progress, then result."""
     logger.info(f"⏳ Attaching to in-flight job {job_id[:8]} for: {query}")
     sent = 0
-    start_time = time.time()
 
-    while time.time() - start_time < job_manager.max_poll_time:
-        events = job_manager.get_progress_events(job_id)
-        for event in events[sent:]:
-            yield _sse(event)
-        sent = len(events)
+    while True:
+        start_time = time.time()
+        while time.time() - start_time < job_manager.max_poll_time:
+            events = job_manager.get_progress_events(job_id)
+            for event in events[sent:]:
+                yield _sse(event)
+            sent = len(events)
 
-        result = job_manager.get_result(job_id)
-        if result:
-            _track(query, result)
-            yield from _result_events(result)
-            yield _done()
+            result = job_manager.get_result(job_id)
+            if result:
+                _track(query, result)
+                yield from _result_events(result)
+                yield _done()
+                return
+
+            time.sleep(job_manager.poll_interval)
+
+        # Nothing finished it in time — its claim may have lapsed with whatever
+        # ran it, so try to take it over. Losing that race means some other
+        # waiter just did: keep following, it's still the same job.
+        logger.warning(f"⏱️ Timeout attached to job {job_id[:8]}, claiming it")
+        claimed, job_id = job_manager.try_claim_job(query)
+        if claimed:
+            yield from _process(query, job_id)
             return
-
-        time.sleep(job_manager.poll_interval)
-
-    # Timeout waiting on the other request - try to process ourselves
-    logger.warning(f"⏱️ Timeout attached to job {job_id[:8]}, claiming it")
-    claimed, job_id = job_manager.try_claim_job(query)
-    if claimed:
-        yield from _process(query, job_id)
-    else:
-        yield _sse({"type": "error", "message": "Unable to process query"})
-        yield _done()
