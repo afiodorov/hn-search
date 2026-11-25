@@ -64,12 +64,6 @@ def limits(request: Request):
         "remaining": verdict.remaining,
         "retry_after_s": verdict.retry_after,
         "you": ip,
-        # TEMPORARY: the caller's own forwarding chain, to see what Railway
-        # and Cloudflare pass on. Remove once client_ip is settled.
-        "debug_forwarded_for": request.headers.get("x-forwarded-for"),
-        "debug_cf_connecting_ip": request.headers.get("cf-connecting-ip"),
-        "debug_x_real_ip": request.headers.get("x-real-ip"),
-        "debug_peer": request.client.host if request.client else None,
     }
 
 

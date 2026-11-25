@@ -10,13 +10,17 @@ The window is a Redis sorted set of run timestamps per IP. Check-then-add is
 not atomic, so two requests racing at the very edge can both get in; for a
 cost guard that is fine. Without Redis there is no limit (local dev).
 
-The client IP: the socket peer is Railway's proxy (or Caddy on staging), so
-the address comes from X-Forwarded-For — its *last* entry, the one the proxy
-in front of us appended; earlier entries are whatever the client sent. In
-production that last hop is a Cloudflare edge (hn.fiodorov.es is proxied by
-Cloudflare), shared by many visitors, and the visitor is in CF-Connecting-IP.
-That header is trusted only when the last hop really is Cloudflare: the
-service also answers on its railway.app address, where anyone can send it.
+The client IP. Production is visitor -> Cloudflare -> Railway's edge ->
+app, and Railway's edge *replaces* X-Forwarded-For (a client-sent one never
+arrives) with two hops: the peer it accepted the connection from, then its
+own edge address (CDN77, varying by region). So the second-to-last hop is the
+real connecting peer. For hn.fiodorov.es that peer is a Cloudflare edge shared
+by many visitors, and the visitor is in CF-Connecting-IP — trusted only when
+that peer really is Cloudflare, since Railway's edge can be reached directly
+with any header. With one hop (Caddy on staging) it is that hop; with none
+(local dev), the socket peer. Checked against production on 2026-11-25:
+IPv4 and IPv6 visitors both resolve to the address Cloudflare's own
+/cdn-cgi/trace reports.
 """
 
 import ipaddress
@@ -78,11 +82,13 @@ def client_ip(headers: Mapping[str, str] | None, peer: str | None) -> str:
     headers = {k.lower(): v for k, v in (headers or {}).items()}
     hops = [h.strip() for h in headers.get("x-forwarded-for", "").split(",")]
     hops = [h for h in hops if h]
-    last = hops[-1] if hops else (peer or "unknown")
+    # Railway: [peer it saw, its own edge]; staging: [peer]; dev: none.
+    connected = hops[-2] if len(hops) >= 2 else hops[-1] if hops else peer
+    connected = connected or "unknown"
     visitor = headers.get("cf-connecting-ip", "").strip()
-    if visitor and _is_cloudflare(last):
+    if visitor and _is_cloudflare(connected):
         return visitor
-    return last
+    return connected
 
 
 def _key(ip: str) -> str:

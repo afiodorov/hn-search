@@ -42,22 +42,33 @@ def redis(monkeypatch):
     return fake
 
 
-def test_the_visitor_is_the_hop_our_proxy_added():
-    # Railway appends the peer it saw; anything before it is client-supplied.
-    headers = {"X-Forwarded-For": "6.6.6.6, 203.0.113.7"}
-    assert ratelimit.client_ip(headers, "10.0.0.1") == "203.0.113.7"
-    assert ratelimit.client_ip({}, "10.0.0.1") == "10.0.0.1"
+RAILWAY_EDGE = "79.127.178.82"  # Railway's own hop, always last
+
+
+def test_the_visitor_is_the_peer_railway_saw():
+    # Railway rewrites the header to [the peer it accepted, its own edge].
+    headers = {"X-Forwarded-For": f"203.0.113.7, {RAILWAY_EDGE}"}
+    assert ratelimit.client_ip(headers, "100.64.0.3") == "203.0.113.7"
+    # Staging's Caddy adds just the peer; local dev has no header.
+    assert ratelimit.client_ip({"X-Forwarded-For": "203.0.113.7"}, None) == (
+        "203.0.113.7"
+    )
+    assert ratelimit.client_ip({}, "127.0.0.1") == "127.0.0.1"
 
 
 def test_cloudflares_visitor_header_counts_only_from_cloudflare():
+    # Production as observed: Cloudflare edge, then Railway's edge.
     via_cf = {
-        "x-forwarded-for": f"6.6.6.6, {CF_EDGE}",
+        "x-forwarded-for": f"{CF_EDGE}, {RAILWAY_EDGE}",
+        "cf-connecting-ip": "2a00:11c0::1",
+    }
+    assert ratelimit.client_ip(via_cf, None) == "2a00:11c0::1"
+
+    # Straight to Railway's edge, header forged: the peer is not Cloudflare.
+    direct = {
+        "x-forwarded-for": f"203.0.113.7, {RAILWAY_EDGE}",
         "cf-connecting-ip": "198.51.100.9",
     }
-    assert ratelimit.client_ip(via_cf, None) == "198.51.100.9"
-
-    # Straight to the railway.app address: the header is forged, not trusted.
-    direct = {"x-forwarded-for": "203.0.113.7", "cf-connecting-ip": "198.51.100.9"}
     assert ratelimit.client_ip(direct, None) == "203.0.113.7"
 
 
