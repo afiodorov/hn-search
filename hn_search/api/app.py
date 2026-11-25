@@ -1,7 +1,9 @@
 """FastAPI app: SSE search endpoint, recent queries, and the built React UI."""
 
+import html
 import json
 import os
+import time
 from urllib.parse import quote
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -247,6 +249,72 @@ def trends_page(request: Request, terms: str = ""):
             image=f"{base}/og.png",
         )
     return _page(tags)
+
+
+# ---- Crawlers -------------------------------------------------------------
+
+SITEMAP_LIMIT = 5000
+SITEMAP_CACHE_KEY = "hn:sitemap"
+SITEMAP_CACHE_TTL = 3600
+
+# What a crawler that runs JavaScript may fetch. /api/search runs the paid
+# pipeline, so it is off limits, and so are ?q= pages, which call it on load;
+# the read-only data the saved-answer and trends pages render from stays open.
+ROBOTS = """User-agent: *
+Allow: /api/answers/
+Allow: /api/trends
+Allow: /api/stats
+Allow: /api/recent
+Disallow: /api/
+Disallow: /*?q=
+Disallow: /mcp
+Disallow: /auth/
+
+Sitemap: {base}/sitemap.xml
+"""
+
+
+@app.get("/robots.txt", response_class=Response)
+def robots(request: Request):
+    return Response(ROBOTS.format(base=_base_url(request)), media_type="text/plain")
+
+
+@app.get("/sitemap.xml", response_class=Response)
+def sitemap(request: Request):
+    """Home, the trends page and its presets, and the newest saved answer of
+    each question still alive (`permalinks.indexed`), newest first."""
+    base = _base_url(request)
+    if redis_client is not None:
+        cached = redis_client.get(f"{SITEMAP_CACHE_KEY}:{base}")
+        if isinstance(cached, bytes):
+            return Response(cached, media_type="application/xml")
+
+    urls = [(f"{base}/", None), (f"{base}/trends", None)]
+    urls += [
+        (f"{base}/trends?terms={quote(','.join(t))}", None)
+        for t in trends.SITEMAP_TERMS
+    ]
+    urls += [
+        (f"{base}/a/{share_id}", time.strftime("%Y-%m-%d", time.gmtime(ts)))
+        for share_id, ts in permalinks.indexed(SITEMAP_LIMIT)
+    ]
+    body = "\n".join(
+        [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+            *(
+                f"  <url><loc>{html.escape(loc)}</loc>"
+                + (f"<lastmod>{mod}</lastmod>" if mod else "")
+                + "</url>"
+                for loc, mod in urls
+            ),
+            "</urlset>",
+            "",
+        ]
+    )
+    if redis_client is not None:
+        redis_client.setex(f"{SITEMAP_CACHE_KEY}:{base}", SITEMAP_CACHE_TTL, body)
+    return Response(body, media_type="application/xml")
 
 
 # The machine-facing surface: /mcp, /api/find, /api/similar, /api/comments and

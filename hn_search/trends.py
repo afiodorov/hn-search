@@ -32,6 +32,16 @@ MIN_PREVIEW_COUNT = 20
 CACHE_TTL = 3600
 PER = 10_000  # rates are per this many comments
 
+# The page's presets, listed in the sitemap so the obvious comparisons are
+# findable. Kept in step with PRESETS in frontend/src/components/Trends.tsx.
+SITEMAP_TERMS = [
+    ["rust", "go", "zig"],
+    ["chatgpt", "claude", "gemini", "deepseek"],
+    ["kubernetes", "docker", "nomad"],
+    ["remote work", "return to office"],
+    ["postgres", "mysql", "sqlite"],
+]
+
 # Categorical slots 1-5 of the dataviz reference palette, light surface;
 # validated as a set (adjacent CVD ΔE ≥ 11.8, normal-vision ΔE ≥ 20.5).
 SERIES = ["#257de0", "#f47230", "#00b894", "#f2a600", "#ee7fac"]

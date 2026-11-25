@@ -1,8 +1,11 @@
 import { useState } from 'react'
+import { toHnComment } from '../hnComment'
 import type { SavedAnswer } from '../types'
 
 interface Props {
   shareId: string | null
+  /** The answer's Markdown, for "Copy as HN comment". */
+  answer: string
   /** The saved answer being shown, when this is not a live run. */
   saved: SavedAnswer | null
   onAskAgain: (query: string) => void
@@ -18,21 +21,23 @@ function savedOn(ts: number): string {
 
 /** Under a finished answer: its shareable link, and for a saved answer, when
  *  it was made and a way to ask the question afresh. */
-export function ShareBar({ shareId, saved, onAskAgain }: Props) {
-  // Keyed by shareId in App, so "copied" never carries over to a new answer.
-  const [copied, setCopied] = useState(false)
+export function ShareBar({ shareId, answer, saved, onAskAgain }: Props) {
+  // Which button last copied. Keyed by shareId in App, so it never carries
+  // over to a new answer.
+  const [copied, setCopied] = useState<'link' | 'comment' | null>(null)
 
   if (!shareId) return null
   const url = `${location.origin}/a/${shareId}`
 
-  const copy = async () => {
+  const copy = async (what: 'link' | 'comment') => {
+    const text = what === 'link' ? url : toHnComment(answer, url)
     try {
-      await navigator.clipboard.writeText(url)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      await navigator.clipboard.writeText(text)
+      setCopied(what)
+      setTimeout(() => setCopied(null), 2000)
     } catch {
-      // No clipboard (insecure context, denied): select the link instead.
-      window.prompt('Copy this link', url)
+      // No clipboard (insecure context, denied): show it to copy by hand.
+      window.prompt('Copy this', text)
     }
   }
 
@@ -51,8 +56,16 @@ export function ShareBar({ shareId, saved, onAskAgain }: Props) {
           </button>
         </span>
       )}
-      <button type="button" className="share-copy" onClick={copy}>
-        {copied ? '✓ Link copied' : 'Copy link'}
+      <button
+        type="button"
+        className="share-copy"
+        onClick={() => copy('comment')}
+        title="The answer as plain text for a Hacker News comment: citations as numbered links at the end"
+      >
+        {copied === 'comment' ? '✓ Comment copied' : 'Copy as HN comment'}
+      </button>
+      <button type="button" className="share-copy" onClick={() => copy('link')}>
+        {copied === 'link' ? '✓ Link copied' : 'Copy link'}
       </button>
     </div>
   )

@@ -36,6 +36,7 @@ from hn_search.logging_config import get_logger
 logger = get_logger(__name__)
 
 SHARE_TTL = 90 * 86400  # 90 days since the last view
+INDEX_KEY = "share:index"  # zset: newest id per question -> created_at
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{8}$")
 
@@ -77,8 +78,14 @@ def save(query: str, answer: str, sources: list[dict], redis=None) -> str | None
         )
         # The id list outlives every id on it: renewed on each save, and a
         # stale id in it only costs forget_query a no-op delete.
+        older = _members(redis, _query_key(query))
         redis.sadd(_query_key(query), share_id)
         redis.expire(_query_key(query), SHARE_TTL)
+        # The sitemap's index: the newest snapshot of each question only, so
+        # one question asked every day is one URL, not ninety.
+        if older:
+            redis.zrem(INDEX_KEY, *older)
+        redis.zadd(INDEX_KEY, {share_id: snapshot["created_at"]})
     except Exception as e:
         logger.exception(f"⚠️ Could not save permalink: {e}")
         return None
@@ -100,12 +107,40 @@ def load(share_id: str, redis=None) -> dict[str, Any] | None:
         return None
 
 
+def _members(redis, key: str) -> list[str]:
+    return [m.decode() if isinstance(m, bytes) else m for m in redis.smembers(key)]
+
+
+def indexed(limit: int, redis=None) -> list[tuple[str, float]]:
+    """The newest `limit` saved answers still alive, as (id, created_at),
+    newest first; ids whose snapshot has expired are dropped from the index
+    on the way."""
+    redis = redis if redis is not None else redis_client
+    if redis is None:
+        return []
+    rows = cast(
+        list[tuple[bytes, float]],
+        redis.zrevrange(INDEX_KEY, 0, limit - 1, withscores=True),
+    )
+    ids = [(m.decode() if isinstance(m, bytes) else m, ts) for m, ts in rows]
+    pipe = redis.pipeline(transaction=False)
+    for share_id, _ in ids:
+        pipe.exists(_key(share_id))
+    alive = pipe.execute()
+    dead = [i for (i, _), ok in zip(ids, alive) if not ok]
+    if dead:
+        redis.zrem(INDEX_KEY, *dead)
+    return [row for row, ok in zip(ids, alive) if ok]
+
+
 def forget_query(query: str, redis) -> None:
     """Delete every saved snapshot of `query` (an admin deleting it from the
     recent list wants it gone, not merely unlisted)."""
     qkey = _query_key(query)
-    ids = [i.decode() if isinstance(i, bytes) else i for i in redis.smembers(qkey)]
+    ids = _members(redis, qkey)
     redis.delete(qkey, *(_key(i) for i in ids))
+    if ids:
+        redis.zrem(INDEX_KEY, *ids)
 
 
 # ---- Link previews ---------------------------------------------------------

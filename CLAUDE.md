@@ -35,7 +35,10 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
   head, since crawlers run no JS), `/a/<id>/og.png` (1200×630 Pillow preview)
   and `/api/answers/<id>`. The UI swaps the address bar to `/a/<id>` once an
   answer lands. Deleting a recent search deletes its saved pages too
-  (`share:q:<query hash>` lists them).
+  (`share:q:<query hash>` lists them). `share:index` (zset) holds the newest
+  id per question for `/sitemap.xml` (cached 1 h). `/robots.txt` keeps
+  crawlers off `/api/search` and `?q=` pages — both run the paid pipeline — and
+  leaves the read-only `/api/answers/`, `/api/trends` open for rendering.
 - `hn_search/trends.py` — `/trends?terms=a,b`: up to five terms' monthly
   mention counts from the `/keyword` index, side by side (`/api/trends`, Redis
   1 h), charted per 10k comments in the UI and as `/trends.png` for previews.

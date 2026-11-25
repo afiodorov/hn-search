@@ -38,6 +38,7 @@ class FakeRedis:
         self.kv: dict[str, bytes] = {}
         self.sets: dict[str, set] = {}
         self.ttl: dict[str, int] = {}
+        self.zsets: dict[str, dict] = {}
 
     def set(self, key, value, ex=None):
         self.kv[key] = value if isinstance(value, bytes) else value.encode()
@@ -61,8 +62,35 @@ class FakeRedis:
             self.kv.pop(key, None)
             self.sets.pop(key, None)
 
-    def zrem(self, *_):
-        pass
+    def zadd(self, key, mapping):
+        self.zsets.setdefault(key, {}).update(mapping)
+
+    def zrem(self, key, *members):
+        for m in members:
+            self.zsets.get(key, {}).pop(m, None)
+
+    def zrevrange(self, key, start, end, withscores=False):
+        rows = sorted(self.zsets.get(key, {}).items(), key=lambda r: -r[1])
+        rows = rows[start : None if end == -1 else end + 1]
+        return [(m.encode(), sc) for m, sc in rows]
+
+    def exists(self, key):
+        return int(key in self.kv)
+
+    def pipeline(self, transaction=True):
+        fake = self
+
+        class Pipe:
+            calls: list = []
+
+            def exists(self, key):
+                self.calls.append(fake.exists(key))
+
+            def execute(self):
+                return self.calls
+
+        Pipe.calls = []
+        return Pipe()
 
     def scan_iter(self, match, count=None):
         return []
@@ -72,6 +100,8 @@ class FakeRedis:
 def redis(monkeypatch, tmp_path):
     fake = FakeRedis()
     monkeypatch.setattr(permalinks, "redis_client", fake)
+    # The app's own caches (the sitemap's) must not reach a real Redis either.
+    monkeypatch.setattr(app_module, "redis_client", None)
     (tmp_path / "index.html").write_text(INDEX)
     monkeypatch.setattr(app_module, "_static_dir", tmp_path)
     permalinks.index_html.cache_clear()
@@ -198,3 +228,38 @@ def test_every_reader_of_a_job_gets_the_same_link(redis, monkeypatch):
 
     list(search.sse_search("refuse me"))
     assert results["refuse me"]["share_id"] is None
+
+
+def test_the_sitemap_lists_the_newest_answer_per_question(redis, client):
+    monkey_time = iter(range(1_700_000_000, 1_700_000_100))
+    original = permalinks.time.time
+    permalinks.time.time = lambda: next(monkey_time)
+    try:
+        stale = _save("rust vs go")
+        fresh = _save("rust vs go")  # the same question, asked again
+        other = _save("sqlite in production")
+        gone = _save("expired question")
+    finally:
+        permalinks.time.time = original
+    del redis.kv[f"share:{gone}"]  # its TTL ran out
+
+    assert [i for i, _ in permalinks.indexed(10)] == [other, fresh]
+    assert gone not in redis.zsets["share:index"]  # pruned on the way
+
+    body = client.get("/sitemap.xml", headers={"host": "hn.example.com"}).text
+    assert f"<loc>https://hn.example.com/a/{fresh}</loc><lastmod>2023-11-14" in body
+    assert stale not in body and gone not in body
+    assert "<loc>https://hn.example.com/trends?terms=rust%2Cgo%2Czig</loc>" in body
+
+    JobManager(redis).delete_recent_query("sqlite in production")
+    assert [i for i, _ in permalinks.indexed(10)] == [fresh]
+
+
+def test_robots_keep_crawlers_off_the_paid_pipeline(client):
+    body = client.get("/robots.txt", headers={"host": "hn.example.com"}).text
+    rules = body.splitlines()
+    # /api/search runs DeepSeek; a ?q= page calls it as soon as it renders.
+    assert "Disallow: /api/" in rules and "Disallow: /*?q=" in rules
+    # What the saved-answer and trends pages render from stays fetchable.
+    assert "Allow: /api/answers/" in rules and "Allow: /api/trends" in rules
+    assert "Sitemap: https://hn.example.com/sitemap.xml" in rules

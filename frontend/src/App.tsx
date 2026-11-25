@@ -157,6 +157,7 @@ export default function App() {
               <ShareBar
                 key={shareId}
                 shareId={shareId}
+                answer={answer}
                 saved={saved}
                 onAskAgain={runSearch}
               />
