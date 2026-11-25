@@ -51,3 +51,10 @@ export interface SavedAnswer {
   sources: Source[]
   created_at: number
 }
+
+/** GET /api/trends — monthly mention counts for up to five terms. `counts`
+ *  in each month is parallel to `terms`; `rows` is that month's comments. */
+export interface TrendsData {
+  terms: { term: string; count: number; first: Source | null }[]
+  months: { month: string; rows: number; counts: number[] }[]
+}

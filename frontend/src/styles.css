@@ -708,3 +708,227 @@ main {
 .footer-links a:hover {
   color: var(--accent);
 }
+
+/* ---- Header nav ---- */
+
+.nav {
+  display: flex;
+  gap: 4px;
+  margin-left: 28px;
+  margin-right: auto;
+}
+
+.nav a {
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.nav a:hover {
+  color: var(--text);
+}
+
+.nav a.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ---- Trends ---- */
+
+/* Categorical slots 1-5 of the dataviz reference palette, a separate step
+   per theme; validated (adjacent CVD ΔE ≥ 10, contrast relief via direct
+   end labels and the table). Colour follows the term's position. */
+:root {
+  --series-1: #257de0;
+  --series-2: #f47230;
+  --series-3: #00b894;
+  --series-4: #f2a600;
+  --series-5: #ee7fac;
+}
+
+[data-theme='dark'] {
+  --series-1: #338ced;
+  --series-2: #e76624;
+  --series-3: #00a888;
+  --series-4: #d28e05;
+  --series-5: #e24d8b;
+}
+
+.s1 { --c: var(--series-1); }
+.s2 { --c: var(--series-2); }
+.s3 { --c: var(--series-3); }
+.s4 { --c: var(--series-4); }
+.s5 { --c: var(--series-5); }
+
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -6px 0 20px;
+}
+
+.preset {
+  padding: 5px 11px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.preset:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.trend {
+  margin: 0 0 20px;
+  padding: 16px 16px 10px;
+}
+
+.trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-bottom: 12px;
+  font-size: 13.5px;
+}
+
+.trend-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.trend-total {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.trend-total a {
+  color: inherit;
+}
+
+.trend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--c);
+}
+
+.trend-plot {
+  position: relative;
+}
+
+.trend-plot svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.trend-grid line {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.trend-grid text,
+.trend-axis {
+  fill: var(--text-muted);
+  font-size: 11px;
+}
+
+.trend-line {
+  fill: none;
+  stroke: var(--c);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.trend-end {
+  fill: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.trend-crosshair {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.trend-dot {
+  fill: var(--c);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.trend-tip {
+  position: absolute;
+  top: 8px;
+  min-width: 200px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  pointer-events: none;
+}
+
+.trend-tip-month {
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.trend-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.6;
+}
+
+.trend-tip-val {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.trend-unit {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.trend-table {
+  overflow-x: auto;
+  padding: 8px 12px;
+}
+
+.trend-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.trend-table th,
+.trend-table td {
+  padding: 4px 8px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.trend-table th:first-child,
+.trend-table td:first-child {
+  text-align: left;
+}
+
+.trend-table .muted {
+  color: var(--text-muted);
+}

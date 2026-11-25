@@ -36,6 +36,10 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
   and `/api/answers/<id>`. The UI swaps the address bar to `/a/<id>` once an
   answer lands. Deleting a recent search deletes its saved pages too
   (`share:q:<query hash>` lists them).
+- `hn_search/trends.py` — `/trends?terms=a,b`: up to five terms' monthly
+  mention counts from the `/keyword` index, side by side (`/api/trends`, Redis
+  1 h), charted per 10k comments in the UI and as `/trends.png` for previews.
+  Only terms with ≥ 20 mentions are named in a title or drawn on the image.
 
 ## Two embedding paths (don't confuse them)
 

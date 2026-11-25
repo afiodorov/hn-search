@@ -9,6 +9,7 @@ import { RecentQueries } from './components/RecentQueries'
 import { SearchBar } from './components/SearchBar'
 import { ShareBar } from './components/ShareBar'
 import { Sources } from './components/Sources'
+import { Trends } from './components/Trends'
 import { useRecentQueries } from './hooks/useRecentQueries'
 import { useSearch } from './hooks/useSearch'
 import { useTheme } from './hooks/useTheme'
@@ -24,6 +25,8 @@ function queryFromUrl(): string {
 function savedIdFromUrl(): string | null {
   return location.pathname.match(/^\/a\/([A-Za-z0-9_-]{8})\/?$/)?.[1] ?? null
 }
+
+const ON_TRENDS = location.pathname.replace(/\/$/, '') === '/trends'
 
 export default function App() {
   const { status, steps, answer, sources, error, shareId, saved, run, load } =
@@ -45,6 +48,11 @@ export default function App() {
     (q: string, push = true) => {
       const query = q.trim()
       if (!query) return
+      // The trends page has no answer area: asking goes to the search page.
+      if (ON_TRENDS) {
+        location.assign(`/?q=${encodeURIComponent(query)}`)
+        return
+      }
       setInput(query)
       if (push) {
         history.pushState({}, '', `/?q=${encodeURIComponent(query)}`)
@@ -100,6 +108,14 @@ export default function App() {
           <span className="logo">Y</span>
           <h1>HN Search</h1>
         </a>
+        <nav className="nav">
+          <a href="/" className={ON_TRENDS ? '' : 'active'}>
+            Ask
+          </a>
+          <a href="/trends" className={ON_TRENDS ? 'active' : ''}>
+            Trends
+          </a>
+        </nav>
         <button
           type="button"
           className="theme-toggle"
@@ -112,37 +128,43 @@ export default function App() {
       </header>
 
       <main>
-        <p className="tagline">
-          Ask questions about Hacker News discussions, get answers with
-          sources.
-        </p>
-        <Freshness />
+        {ON_TRENDS ? (
+          <Trends />
+        ) : (
+          <>
+            <p className="tagline">
+              Ask questions about Hacker News discussions, get answers with
+              sources.
+            </p>
+            <Freshness />
 
-        <SearchBar
-          value={input}
-          running={status === 'running'}
-          onChange={setInput}
-          onSearch={runSearch}
-        />
+            <SearchBar
+              value={input}
+              running={status === 'running'}
+              onChange={setInput}
+              onSearch={runSearch}
+            />
 
-        {status === 'idle' && <Examples onSelect={runSearch} />}
+            {status === 'idle' && <Examples onSelect={runSearch} />}
 
-        <ProgressLog steps={steps} status={status} />
+            <ProgressLog steps={steps} status={status} />
 
-        {error && <div className="error card">⚠ {error}</div>}
+            {error && <div className="error card">⚠ {error}</div>}
 
-        <Answer answer={answer} status={status} />
+            <Answer answer={answer} status={status} />
 
-        {status === 'done' && (
-          <ShareBar
-            key={shareId}
-            shareId={shareId}
-            saved={saved}
-            onAskAgain={runSearch}
-          />
+            {status === 'done' && (
+              <ShareBar
+                key={shareId}
+                shareId={shareId}
+                saved={saved}
+                onAskAgain={runSearch}
+              />
+            )}
+
+            <Sources sources={sources} />
+          </>
         )}
-
-        <Sources sources={sources} />
 
         <Footer />
       </main>

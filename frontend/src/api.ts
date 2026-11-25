@@ -5,6 +5,7 @@ import type {
   SavedAnswer,
   Source,
   Stats,
+  TrendsData,
 } from './types'
 
 export interface SearchHandlers {
@@ -89,5 +90,14 @@ export async function fetchSaved(id: string): Promise<SavedAnswer | null> {
   const res = await fetch(`/api/answers/${encodeURIComponent(id)}`)
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`saved answer failed: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchTrends(terms: string): Promise<TrendsData> {
+  const res = await fetch(`/api/trends?terms=${encodeURIComponent(terms)}`)
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    throw new Error(body?.detail ?? `trends failed: ${res.status}`)
+  }
   return res.json()
 }

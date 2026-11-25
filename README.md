@@ -22,6 +22,10 @@ question with cited sources.
   cited answer
 - 🔢 **Exact keyword counts**: a full-text (FTS5) index over every comment answers
   "how many", "per month" and "first mention" questions exactly
+- 📈 **Trends**: [compare how often terms are mentioned, month by month](https://hn.fiodorov.es/trends?terms=chatgpt,claude,gemini,deepseek)
+  — exact counts from the same index, with a shareable chart preview
+- 🔗 **Shareable answers**: every answer gets a saved `/a/<id>` page with a link
+  preview (title, summary, image)
 - ⚡ **ONNX query encoder**: serve without torch (~300 MB instead of ~1.5 GB RAM)
 - 🔄 **Online updates**: daily incremental `/append`, no index rebuild
 - 🔐 **Two-token auth**: read token on the public web app, admin (write) token only

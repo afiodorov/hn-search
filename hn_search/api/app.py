@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette import EventSourceResponse
 
-from .. import permalinks, search_backend
+from .. import permalinks, search_backend, trends
 from ..cache_config import redis_client
 from ..logging_config import get_logger
 from . import agents, auth
@@ -183,6 +183,70 @@ def _site_tags(base: str, url: str, query: str = "") -> str:
         url=url,
         image=f"{base}/og.png",
     )
+
+
+def _trend_terms(raw: str) -> list[str]:
+    terms = trends.parse_terms(raw)
+    if not terms:
+        raise HTTPException(status_code=400, detail="Give at least one term")
+    return terms
+
+
+@app.get("/api/trends")
+def trends_data(terms: str = ""):
+    """Mentions per month for up to five comma-separated terms (`trends.py`)."""
+    try:
+        return trends.get(_trend_terms(terms))
+    except HTTPException:
+        raise
+    except Exception as e:  # service down, or no fts.sqlite on the box
+        raise HTTPException(status_code=503, detail=f"trends unavailable: {e}")
+
+
+@app.get("/trends.png")
+def trends_image(terms: str = ""):
+    try:
+        data = trends.get(_trend_terms(terms))
+    except HTTPException:
+        raise
+    except Exception:
+        return site_image()
+    return Response(
+        trends.chart_image(data),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/trends", response_class=HTMLResponse)
+def trends_page(request: Request, terms: str = ""):
+    """The SPA with a preview naming the terms and charting them. Without
+    terms, or when the index is unreachable, it is the generic trends page."""
+    base = _base_url(request)
+    parsed = trends.parse_terms(terms)
+    url = f"{base}/trends" + (f"?terms={quote(','.join(parsed))}" if parsed else "")
+    data = None
+    if parsed:
+        try:
+            data = trends.get(parsed)
+        except Exception as e:
+            logger.warning(f"trends preview unavailable: {e}")
+    if data and trends.previewable(data):
+        tags = permalinks.meta_tags(
+            title=f"{trends.title(data)} — {permalinks.SITE_NAME}",
+            description=trends.description(data),
+            url=url,
+            image=f"{base}/trends.png?terms={quote(','.join(parsed))}",
+        )
+    else:
+        tags = permalinks.meta_tags(
+            title=f"Hacker News trends — {permalinks.SITE_NAME}",
+            description="How often Hacker News comments mention anything, month "
+            "by month, from an exact full-text index of every comment since 2023.",
+            url=url,
+            image=f"{base}/og.png",
+        )
+    return _page(tags)
 
 
 # The machine-facing surface: /mcp, /api/find, /api/similar, /api/comments and
