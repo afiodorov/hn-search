@@ -230,3 +230,6 @@ evals/runs/
 # promptfoo eval output and its npx cache
 evals/guard/output/
 .promptfoo/
+
+# Railway IaC SDK, installed only to run `railway config plan/apply`
+.railway/node_modules/

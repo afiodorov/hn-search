@@ -85,9 +85,15 @@ The daily updater batches at 1000 rows (~10 MB), comfortably under 64 MB.
 ## Production deployment (Railway, the web app)
 
 **Pushing `main` deploys production** — when the push touches what the image is
-built from. `railway.json`'s watch paths skip pushes that only change `misc/`,
+built from. The service's watch paths skip pushes that only change `misc/`,
 `airflow/`, `rust-search/`, tests, docs or tool config in `pyproject.toml` (the
-image installs from `uv.lock`, which any dependency change also touches). Railway
+image installs from `uv.lock`, which any dependency change also touches). They
+live in `.railway/railway.ts` (Railway IaC; `railway.json` stopped being read on
+2026-12-01), which a push does **not** apply: edit it, then `railway config plan`
+and `railway config apply --yes` (variables stay unmanaged, set in Railway).
+Those need its SDK: `npm i --no-save --no-package-lock --prefix .railway
+railway`, and run `railway` directly, not under `timeout` (the SDK finds the CLI
+through `$_`). Railway
 builds the `Dockerfile` from the GitHub repo (`hn-search-web` service, `Redis` alongside) and is live at
 https://hn.fiodorov.es a few minutes later; `railway deployment list` shows it
 (`railway link -p hn-search -s hn-search-web` once per machine; the CLI's
