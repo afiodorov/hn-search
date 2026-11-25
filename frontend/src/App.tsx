@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { fetchMe, logout } from './api'
 import { Answer } from './components/Answer'
+import { Examples } from './components/Examples'
+import { Footer } from './components/Footer'
 import { Freshness } from './components/Freshness'
 import { ProgressLog } from './components/ProgressLog'
 import { RecentQueries } from './components/RecentQueries'
@@ -123,6 +125,8 @@ export default function App() {
           onSearch={runSearch}
         />
 
+        {status === 'idle' && <Examples onSelect={runSearch} />}
+
         <ProgressLog steps={steps} status={status} />
 
         {error && <div className="error card">⚠ {error}</div>}
@@ -139,6 +143,8 @@ export default function App() {
         )}
 
         <Sources sources={sources} />
+
+        <Footer />
       </main>
 
       <RecentQueries

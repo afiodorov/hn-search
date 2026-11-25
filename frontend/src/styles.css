@@ -614,3 +614,97 @@ main {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* ---- Example questions (empty page) ---- */
+
+.examples h2 {
+  margin: 8px 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.example-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.example {
+  padding: 12px 14px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.example:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---- Footer: the agent-facing surface ---- */
+
+.footer {
+  margin-top: 48px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.footer p {
+  margin: 0 0 8px;
+}
+
+.footer strong {
+  color: var(--text);
+}
+
+.footer code {
+  font-size: 12.5px;
+}
+
+.footer-cmd {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.footer-cmd code {
+  flex: 1;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.footer-cmd:hover {
+  border-color: var(--accent);
+}
+
+.footer-copy {
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.footer-links a {
+  color: var(--text-muted);
+}
+
+.footer-links a:hover {
+  color: var(--accent);
+}
