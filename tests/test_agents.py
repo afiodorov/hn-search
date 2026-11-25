@@ -263,3 +263,23 @@ def test_mcp_error_is_readable(client):
     result = _call(client, "search", query="")
     assert result["isError"] is True
     assert "empty" in result["content"][0]["text"]
+
+
+def test_mcp_ask_counts_against_the_hourly_limit(client, monkeypatch):
+    from hn_search import ratelimit
+
+    class Full:
+        """A Redis where the caller has used every run this hour."""
+
+        def zremrangebyscore(self, *a):
+            pass
+
+        def zrange(self, *a, **k):
+            return [(b"x", 0.0)] * ratelimit.LIMIT
+
+    monkeypatch.setattr(ratelimit, "redis_client", Full())
+    monkeypatch.setattr(agents, "ask", lambda q: pytest.fail("ran over the limit"))
+
+    result = _call(client, "ask", question="rust vs go?")
+    assert result["isError"] is True
+    assert "Try again in" in result["content"][0]["text"]

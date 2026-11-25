@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette import EventSourceResponse
 
-from .. import permalinks, search_backend, trends
+from .. import permalinks, ratelimit, search_backend, trends
 from ..cache_config import redis_client
 from ..logging_config import get_logger
 from . import agents, auth
@@ -38,12 +38,33 @@ logger = get_logger(__name__)
 app = FastAPI(title="HN RAG Search", lifespan=lifespan)
 
 
+def _client_ip(request: Request) -> str:
+    return ratelimit.client_ip(
+        request.headers, request.client.host if request.client else None
+    )
+
+
 @app.get("/api/search")
-def search(q: str = ""):
+def search(request: Request, q: str = ""):
     query = q.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query must not be empty")
-    return EventSourceResponse(sse_search(query))
+    return EventSourceResponse(sse_search(query, _client_ip(request)))
+
+
+@app.get("/api/limits")
+def limits(request: Request):
+    """How many new questions the caller has left this hour (`ratelimit.py`).
+    `you` is the address they are counted under."""
+    ip = _client_ip(request)
+    verdict = ratelimit.peek(ip)
+    return {
+        "limit": ratelimit.LIMIT,
+        "window_s": ratelimit.WINDOW,
+        "remaining": verdict.remaining,
+        "retry_after_s": verdict.retry_after,
+        "you": ip,
+    }
 
 
 @app.get("/api/recent")

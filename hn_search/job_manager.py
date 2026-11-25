@@ -69,6 +69,19 @@ class JobManager:
             # Fallback: allow processing if Redis fails
             return True, job_id
 
+    def release_job(self, job_id: str) -> None:
+        """Give back a claim that will not be worked (the asker was over their
+        limit), so the next request for the query can claim it at once rather
+        than waiting out job_timeout behind a job nothing is running."""
+        if not self.redis:
+            return
+        try:
+            status_key = f"job:{job_id}:status"
+            if self.redis.get(status_key) == b"processing":
+                self.redis.delete(status_key)
+        except Exception as e:
+            logger.exception(f"⚠️ Error releasing job {job_id[:8]}: {e}")
+
     def store_result(self, job_id: str, result: Dict[str, Any]):
         """Store job result and mark as completed."""
         if not self.redis:

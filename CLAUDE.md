@@ -39,6 +39,14 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
   id per question for `/sitemap.xml` (cached 1 h). `/robots.txt` keeps
   crawlers off `/api/search` and `?q=` pages — both run the paid pipeline — and
   leaves the read-only `/api/answers/`, `/api/trends` open for rendering.
+- `hn_search/ratelimit.py` — 20 new questions per hour per IP (sliding window,
+  Redis zset `rl:ask:<ip>`), for `/api/search` and MCP `ask`, the two paths
+  that run paid models. Only a claimed job counts: cached answers, attaching to
+  an in-flight question, saved pages and every other tool are free; a refused
+  claim is released (`JobManager.release_job`). The IP is the last
+  `X-Forwarded-For` hop, or `CF-Connecting-IP` when that hop is Cloudflare
+  (hn.fiodorov.es is Cloudflare-proxied; the header is forgeable on the
+  railway.app address). `GET /api/limits` shows a caller's count and IP.
 - `hn_search/trends.py` — `/trends?terms=a,b`: up to five terms' monthly
   mention counts from the `/keyword` index, side by side (`/api/trends`, Redis
   1 h), charted per 10k comments in the UI and as `/trends.png` for previews.

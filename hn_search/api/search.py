@@ -13,7 +13,7 @@ import time
 
 from sse_starlette import ServerSentEvent
 
-from hn_search import permalinks
+from hn_search import permalinks, ratelimit
 from hn_search.cache_config import redis_client
 from hn_search.job_manager import JobManager
 from hn_search.logging_config import get_logger
@@ -32,10 +32,19 @@ def _done() -> ServerSentEvent:
     return ServerSentEvent(event="done", data="{}")
 
 
-def sse_search(query: str):
+def sse_search(query: str, ip: str | None = None):
+    """`ip` is the asker's, for the per-IP limit (`ratelimit.py`); None means
+    unlimited. Only a claimed job — a new pipeline run — counts against it."""
     claimed, job_id = job_manager.try_claim_job(query)
 
     if claimed:
+        verdict = ratelimit.take(ip) if ip else None
+        if verdict and not verdict.allowed:
+            logger.info(f"🚦 Rate-limited {ip}: {query}")
+            job_manager.release_job(job_id)
+            yield _sse({"type": "error", "message": verdict.message()})
+            yield _done()
+            return
         yield from _process(query, job_id)
     else:
         result = job_manager.get_result(job_id)

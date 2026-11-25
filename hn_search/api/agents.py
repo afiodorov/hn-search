@@ -27,11 +27,11 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-from hn_search import search_backend
+from hn_search import ratelimit, search_backend
 from hn_search.logging_config import get_logger
 from hn_search.rag.pipeline import search_stream
 from hn_search.rag.tools import keyword_stats, semantic_search, similar_comments
@@ -290,16 +290,25 @@ async def stats_tool() -> dict[str, Any]:
 
 
 @server.tool(name="ask")
-async def ask_tool(question: str) -> dict[str, Any]:
+async def ask_tool(question: str, ctx: Context) -> dict[str, Any]:
     """Ask the hosted RAG agent and get its finished, cited answer plus the
     sources it used. Slower and lossier than searching yourself; use it when you
     want a second opinion or do not want to run the searches. A question that is
     not about what Hacker News discusses is refused: `refused` is true and
-    `answer` says so.
+    `answer` says so. Each call runs paid models, so it is limited to 20 per
+    hour per IP; search, similar, comments, keyword and stats are not limited.
 
     Args:
         question: A question about what Hacker News thinks.
     """
+    # Every ask is a fresh paid run (no answer cache on this path), so every
+    # one counts against the caller's hourly limit, shared with the web UI.
+    request = ctx.request_context.request
+    client = getattr(request, "client", None)
+    ip = ratelimit.client_ip(ctx.headers, client.host if client else None)
+    verdict = ratelimit.take(ip)
+    if not verdict.allowed:
+        raise ToolError(verdict.message())
     return await _tool(ask, question)
 
 
@@ -390,6 +399,10 @@ Streamable HTTP endpoint: {base}{MCP_PATH}
 Tools: search(query, k, time_after, time_before), similar(hn_id, k), \
 comments(hn_ids), keyword(term, time_after, time_before, k), stats(), \
 ask(question).
+
+`ask` and /api/search run paid models: 20 new questions per hour per IP
+(a question already answered recently is free). Everything else is unlimited;
+prefer it. GET /api/limits shows what you have left.
 
 - Claude Code: `claude mcp add --transport http hn-search {base}{MCP_PATH}`
 - Claude API: mcp_servers=[{{"type": "url", "url": "{base}{MCP_PATH}", "name": "hn-search"}}]
