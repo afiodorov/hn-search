@@ -135,7 +135,7 @@ def require_admin(request: Request) -> str:
     return user
 
 
-def _secure(request: Request) -> bool:
+def is_secure(request: Request) -> bool:
     # Behind Railway or Caddy the request arrives as http; only a dev loopback
     # is genuinely plain. Same reasoning as llms.txt's scheme fix-up.
     return request.url.hostname not in ("localhost", "127.0.0.1", "::1")
@@ -143,7 +143,7 @@ def _secure(request: Request) -> bool:
 
 def _callback_url(request: Request) -> str:
     base = request.base_url
-    if _secure(request):
+    if is_secure(request):
         base = base.replace(scheme="https")
     return str(base).rstrip("/") + CALLBACK_PATH
 
@@ -185,7 +185,7 @@ def login(request: Request) -> Response:
         max_age=600,
         httponly=True,
         samesite="lax",
-        secure=_secure(request),
+        secure=is_secure(request),
     )
     return response
 
@@ -214,7 +214,7 @@ async def callback(request: Request, code: str = "", state: str = "") -> Respons
         max_age=COOKIE_DAYS * 86400,
         httponly=True,
         samesite="lax",
-        secure=_secure(request),
+        secure=is_secure(request),
     )
     response.delete_cookie(STATE_COOKIE)
     return response

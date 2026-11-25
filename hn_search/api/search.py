@@ -13,6 +13,7 @@ import time
 
 from sse_starlette import ServerSentEvent
 
+from hn_search import permalinks
 from hn_search.cache_config import redis_client
 from hn_search.job_manager import JobManager
 from hn_search.logging_config import get_logger
@@ -67,6 +68,7 @@ def _result_events(result: dict):
             "type": "answer",
             "text": result.get("answer", ""),
             "refused": bool(result.get("refused")),
+            "share_id": result.get("share_id"),
         }
     )
 
@@ -115,10 +117,17 @@ def _run_job(query: str, job_id: str, emit) -> None:
                 sources = event["sources"]
             elif etype == "answer":
                 refused = bool(event.get("refused"))
+                # Saved before the result, so every request served from the
+                # job (now, attached, or replayed later) gets the same link.
+                share_id = (
+                    None if refused else permalinks.save(query, event["text"], sources)
+                )
+                event = {**event, "share_id": share_id}
                 result = {
                     "answer": event["text"],
                     "sources": sources,
                     "refused": refused,
+                    "share_id": share_id,
                 }
                 job_manager.store_result(job_id, result)
                 _track(query, result)

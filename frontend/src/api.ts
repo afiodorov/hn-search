@@ -1,10 +1,19 @@
-import type { Me, ProgressEvent, RecentQuery, Source, Stats } from './types'
+import type {
+  Me,
+  ProgressEvent,
+  RecentQuery,
+  SavedAnswer,
+  Source,
+  Stats,
+} from './types'
 
 export interface SearchHandlers {
   onProgress: (ev: ProgressEvent) => void
   onSources: (sources: Source[]) => void
   onToken: (text: string) => void
-  onAnswer: (text: string) => void
+  /** shareId is the answer's saved id (`/a/<id>`); null for a refusal, or when the
+   *  server could not save it. */
+  onAnswer: (text: string, shareId: string | null) => void
   onError: (message: string) => void
   onDone: () => void
 }
@@ -23,9 +32,10 @@ export function streamSearch(query: string, h: SearchHandlers): () => void {
   es.addEventListener('token', (e) =>
     h.onToken(JSON.parse((e as MessageEvent).data).text),
   )
-  es.addEventListener('answer', (e) =>
-    h.onAnswer(JSON.parse((e as MessageEvent).data).text),
-  )
+  es.addEventListener('answer', (e) => {
+    const data = JSON.parse((e as MessageEvent).data)
+    h.onAnswer(data.text, data.share_id ?? null)
+  })
   es.addEventListener('done', () => {
     es.close()
     h.onDone()
@@ -71,5 +81,13 @@ export async function deleteRecent(query: string): Promise<void> {
 export async function fetchStats(): Promise<Stats> {
   const res = await fetch('/api/stats')
   if (!res.ok) throw new Error(`stats failed: ${res.status}`)
+  return res.json()
+}
+
+/** A saved answer, or null when there is no such id (or it was deleted). */
+export async function fetchSaved(id: string): Promise<SavedAnswer | null> {
+  const res = await fetch(`/api/answers/${encodeURIComponent(id)}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`saved answer failed: ${res.status}`)
   return res.json()
 }

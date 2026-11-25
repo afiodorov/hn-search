@@ -569,3 +569,48 @@ main {
   font-size: 11.5px;
   white-space: nowrap;
 }
+
+/* ---- Share bar (under a finished answer) ---- */
+
+.share-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: -8px 0 20px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.share-note {
+  margin-right: auto;
+}
+
+.share-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.share-link:hover {
+  text-decoration: underline;
+}
+
+.share-copy {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.share-copy:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

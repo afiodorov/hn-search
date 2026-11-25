@@ -5,6 +5,7 @@ import json
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from hn_search import permalinks
 from hn_search.cache_config import RESULT_CACHE_TTL, query_cache_patterns
 from hn_search.logging_config import get_logger
 
@@ -194,7 +195,8 @@ class JobManager:
 
     def delete_recent_query(self, query: str) -> None:
         """Forget a query: its row in the recent list, its cached job (status,
-        result, progress), and the search results and answers cached under it,
+        result, progress), its saved answer pages (`permalinks.py`), and the
+        search results and answers cached under it,
         so its next run is computed afresh rather than rebuilt from the same
         cache. The eval log is left alone — it is a record of what the pipeline
         did. Idempotent; a query that is already gone is not an error."""
@@ -214,6 +216,7 @@ class JobManager:
                 keys = list(self.redis.scan_iter(match=pattern, count=1000))
                 if keys:
                     self.redis.delete(*keys)
+            permalinks.forget_query(query, self.redis)
         except Exception as e:
             logger.exception(f"⚠️ Error deleting recent query: {e}")
 

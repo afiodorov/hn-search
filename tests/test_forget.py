@@ -23,6 +23,9 @@ class _FakeRedis:
         for key in keys:
             self.store.pop(key, None)
 
+    def smembers(self, key):
+        return set()
+
     def scan_iter(self, match, count=None):
         return [k for k in list(self.store) if fnmatch.fnmatchcase(k, match)]
 

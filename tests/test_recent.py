@@ -17,6 +17,9 @@ def tracked(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(search.job_manager, "track_recent_query", calls.append)
     monkeypatch.setattr(search.job_manager, "log_eval_record", lambda *a: None)
+    # Saving the answer's permalink is test_permalinks.py's business; here it
+    # must not reach whatever Redis the machine has.
+    monkeypatch.setattr(search.permalinks, "save", lambda *a: "abcdefgh")
     return calls
 
 
@@ -44,7 +47,12 @@ def test_an_admitted_query_is_tracked_once_answered(monkeypatch, tracked):
 
     assert tracked == ["rust vs go"]
     assert _answers(events) == [
-        {"type": "answer", "text": "An answer.", "refused": False}
+        {
+            "type": "answer",
+            "text": "An answer.",
+            "refused": False,
+            "share_id": "abcdefgh",
+        }
     ]
 
 

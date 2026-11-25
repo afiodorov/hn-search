@@ -28,6 +28,14 @@ recall numbers, and cost rationale. This file is the operator's cheat-sheet.
   HTTP MCP, tools `search`, `similar`, `comments`, `stats`, `ask`), the same as
   JSON under `/api/find`, `/api/similar`, `/api/comments`, and `/llms.txt` as
   the map. Unauthenticated on purpose. Tests: `uv run --group test pytest`.
+- `hn_search/permalinks.py` — shareable answer pages. Every admitted answer is
+  saved (zlib JSON) as Redis `share:<8-char id>`, expiring 90 days after its
+  last view (`SHARE_TTL`; each load renews it), and served at
+  `/a/<id>` (the SPA with that answer's `og:`/`twitter:` tags written into the
+  head, since crawlers run no JS), `/a/<id>/og.png` (1200×630 Pillow preview)
+  and `/api/answers/<id>`. The UI swaps the address bar to `/a/<id>` once an
+  answer lands. Deleting a recent search deletes its saved pages too
+  (`share:q:<query hash>` lists them).
 
 ## Two embedding paths (don't confuse them)
 

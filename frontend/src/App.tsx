@@ -5,6 +5,7 @@ import { Freshness } from './components/Freshness'
 import { ProgressLog } from './components/ProgressLog'
 import { RecentQueries } from './components/RecentQueries'
 import { SearchBar } from './components/SearchBar'
+import { ShareBar } from './components/ShareBar'
 import { Sources } from './components/Sources'
 import { useRecentQueries } from './hooks/useRecentQueries'
 import { useSearch } from './hooks/useSearch'
@@ -17,8 +18,14 @@ function queryFromUrl(): string {
   return new URLSearchParams(location.search).get('q') ?? ''
 }
 
+/** The id in a /a/<id> permalink, or null on any other page. */
+function savedIdFromUrl(): string | null {
+  return location.pathname.match(/^\/a\/([A-Za-z0-9_-]{8})\/?$/)?.[1] ?? null
+}
+
 export default function App() {
-  const { status, steps, answer, sources, error, run } = useSearch()
+  const { status, steps, answer, sources, error, shareId, saved, run, load } =
+    useSearch()
   const { queries, refresh, remove } = useRecentQueries(25)
   const { theme, toggle } = useTheme()
   const [input, setInput] = useState(queryFromUrl)
@@ -38,7 +45,7 @@ export default function App() {
       if (!query) return
       setInput(query)
       if (push) {
-        history.pushState({}, '', `?q=${encodeURIComponent(query)}`)
+        history.pushState({}, '', `/?q=${encodeURIComponent(query)}`)
       }
       run(query)
       window.scrollTo({ top: 0 })
@@ -46,14 +53,21 @@ export default function App() {
     [run],
   )
 
-  useEffect(() => {
+  // What the address bar asks for: a saved answer, a question to run, or
+  // nothing.
+  const followUrl = useCallback(() => {
+    const id = savedIdFromUrl()
+    if (id) {
+      load(id).then((snap) => snap && setInput(snap.query))
+      return
+    }
     const q = queryFromUrl()
     if (q) runSearch(q, false)
+  }, [load, runSearch])
 
-    const onPop = () => {
-      const q = queryFromUrl()
-      if (q) runSearch(q, false)
-    }
+  useEffect(() => {
+    followUrl()
+    const onPop = () => followUrl()
     addEventListener('popstate', onPop)
     return () => removeEventListener('popstate', onPop)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -62,6 +76,20 @@ export default function App() {
   useEffect(() => {
     if (status === 'done') refresh()
   }, [status, refresh])
+
+  // Once a live answer is saved, the address bar becomes its permalink, so
+  // what people copy from it is the answer they saw rather than a question
+  // that reruns. replaceState: Back still leaves the page, as it would have.
+  useEffect(() => {
+    if (
+      status === 'done' &&
+      shareId &&
+      !saved &&
+      savedIdFromUrl() !== shareId
+    ) {
+      history.replaceState({}, '', `/a/${shareId}`)
+    }
+  }, [status, shareId, saved])
 
   return (
     <div className="layout">
@@ -100,6 +128,15 @@ export default function App() {
         {error && <div className="error card">⚠ {error}</div>}
 
         <Answer answer={answer} status={status} />
+
+        {status === 'done' && (
+          <ShareBar
+            key={shareId}
+            shareId={shareId}
+            saved={saved}
+            onAskAgain={runSearch}
+          />
+        )}
 
         <Sources sources={sources} />
       </main>

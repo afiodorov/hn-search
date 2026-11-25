@@ -41,3 +41,13 @@ export interface Stats {
   earliest_timestamp?: string
   latest_timestamp: string
 }
+
+/** GET /api/answers/:id — an answer saved for good under a short id, the
+ *  thing a /a/:id link shows. */
+export interface SavedAnswer {
+  id: string
+  query: string
+  answer: string
+  sources: Source[]
+  created_at: number
+}
